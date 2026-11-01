@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dnslens"
-version = "1.0.1"
+version = "1.0.2"
 description = "Cross-platform DNS toolkit for developers and DevOps: query, trace, propagation, audit, DNSSEC, local DNS server and HTTP/Prometheus API."
 readme = "README.md"
 requires-python = ">=3.9"
