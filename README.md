@@ -3,7 +3,7 @@
 # dnslens
 
 **A cross-platform DNS toolkit for developers and DevOps.**
-Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a local DNS server and an HTTP/Prometheus API. One package, one dependency.
+Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a local DNS server **with an AdGuard Home style web UI** (statistics, charts, query log, blocklists, DNS rewrites) and an HTTP/Prometheus API. One package, one dependency.
 
 [![CI](https://github.com/cumulus13/dnslens/actions/workflows/ci.yml/badge.svg)](https://github.com/cumulus13/dnslens/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dnslens)](https://pypi.org/project/dnslens/)
@@ -14,6 +14,31 @@ Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a lo
 
 ---
 
+<p align="center">
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot1.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot1.png" width="98%" alt="Screenshot 1">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot2.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot2.png" width="98%" alt="Screenshot 2">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot3.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot3.png" width="98%" alt="Screenshot 3">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot4.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot4.png" width="98%" alt="Screenshot 4">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot5.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot5.png" width="98%" alt="Screenshot 5">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot6.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot6.png" width="98%" alt="Screenshot 6">
+  </a>
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot7.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot7.png" width="98%" alt="Screenshot 7">
+  </a>
+</p>
+
+
 ## Contents
 
 - [Why dnslens](#why-dnslens)
@@ -23,6 +48,7 @@ Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a lo
 - [Command reference](#command-reference)
   - [query](#query) · [trace](#trace) · [propagate](#propagate) · [wait](#wait) · [bench](#bench) · [audit](#audit) · [dnssec](#dnssec) · [reverse](#reverse)
 - [DNS server: `dnslens serve`](#dns-server-dnslens-serve)
+- [Web UI: `dnslens serve --web`](#web-ui-dnslens-serve---web)
 - [HTTP API: `dnslens api`](#http-api-dnslens-api)
 - [Recipes](#recipes)
 - [Use as a Python library](#use-as-a-python-library)
@@ -46,6 +72,7 @@ Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a lo
 | pick the fastest resolver | `dnslens bench` |
 | check a domain's NS, SOA, mail auth, CAA and DNSSEC | `dnslens audit`, `dnslens dnssec` |
 | override names for dev/staging/CI, or block ads on a LAN | `dnslens serve` |
+| manage that server from a browser: stats, charts, query log, blocklists | `dnslens serve --web` |
 | expose all of this to dashboards and Prometheus | `dnslens api` |
 
 Design goals: **works the same on Windows, Linux and macOS**, scriptable (`--json`, meaningful exit codes), no native tools required (no `dig`, no `nslookup`), and safe defaults for the two server components.
@@ -68,6 +95,7 @@ dnslens query example.com A -r 1.1.1.1 --short     # only the data
 dnslens propagate app.example.com --expect 203.0.113.10
 dnslens audit example.com
 dnslens serve --record "app.test A 10.0.0.5"       # local DNS server on 127.0.0.1:5353
+dnslens serve --web                                # same, plus the web UI on http://127.0.0.1:8080
 dnslens api --token secret                         # HTTP API on 127.0.0.1:8053
 ```
 
@@ -92,6 +120,7 @@ flowchart LR
     end
 
     SRV["DNS server<br/>dnslens serve"]
+    WEBUI["Web UI + query log<br/>dnslens serve --web"]
     CORE["core.query<br/>transport, retries, EDNS, TCP fallback"]
 
     subgraph NET["Network"]
@@ -105,6 +134,8 @@ flowchart LR
     LIB --> TOOLS
     CLI --> SRV
     LIB --> SRV
+    SRV --- WEBUI
+    WEBUI --> TOOLS
     QRY --> CORE
     PRP --> CORE
     AUD --> CORE
@@ -528,6 +559,179 @@ Unknown keys, invalid IPs or a CNAME mixed with other types are rejected at load
 
 Operating-system resolver settings cannot specify a port, so for system-wide use run on **port 53** (see [Troubleshooting](#troubleshooting)) or put it behind a forwarder that supports custom ports (dnsmasq `server=127.0.0.1#5353`, systemd-resolved drop-ins, Windows NRPT). For per-tool testing, `dnslens query -r 127.0.0.1#5353` and `dig -p 5353 @127.0.0.1` work directly.
 
+## Web UI: `dnslens serve --web`
+
+An AdGuard Home style control panel for the DNS server: live statistics and charts, a searchable query log, blocklist subscriptions, DNS rewrites, runtime settings and the diagnostics from this package, all in the browser. It is a single-page app **shipped inside the Python package** (plain HTML/CSS/JS, no Node, no build step, no CDN), so it works offline, on Windows and on a Raspberry Pi alike.
+
+```bash
+dnslens serve --web                                   # DNS on 127.0.0.1:5353, UI on http://127.0.0.1:8080
+dnslens serve --web --host 0.0.0.0 --port 53 --web-host 0.0.0.0 --web-cert cert.pem --web-key key.pem
+dnslens serve --web --web-password 'a long passphrase' --data-dir /var/lib/dnslens
+```
+
+On the first start a random admin password is generated, printed **once** in the log and stored hashed (PBKDF2-SHA256, 240k iterations). Change it on the *Account* page. `--web-password` (or env `DNSLENS_WEB_PASSWORD`) sets it explicitly, which is also how you recover a forgotten one.
+
+### Pages
+
+| Page | What you get |
+|---|---|
+| **Dashboard** | Query, blocked, cache-hit and rule counters; stacked timeline chart (resolved / blocked / failed) with hover details; top queried domains, top blocked domains, top clients, upstream servers with average latency, query types and response codes; windows of 1 h, 6 h, 24 h, 7 d, 30 d; refreshes every 10 s. One click blocks or allows a domain straight from the top lists. |
+| **Query log** | Every query with time, domain, type, status (Blocked, Cached, Local, Resolved, Failed), answers, client, upstream and latency. Search, status filter, paging, live mode, row details (which rule in which list blocked it), one-click Block / Unblock. |
+| **Filters** | Subscribe to blocklists by URL (presets included), enable/disable, update now, automatic refresh. Custom rules editor (`\|\|domain^`, `@@\|\|domain^`). *Check a host* tells you which rule and list would block a name. |
+| **DNS rewrites** | Point names (wildcards allowed) at an address or another name, with A/AAAA/CNAME/TXT/MX/PTR/NS/SRV/CAA, TTL, enable/disable, edit in place. |
+| **Settings** | Upstream servers (with a connectivity test), timeout, cache size and max TTL, forwarding on/off, block response (NXDOMAIN or `0.0.0.0`), query-log on/off, retention, client-IP anonymization, list update interval, clear cache. |
+| **Tools** | The dnslens diagnostics in the browser: lookup, propagation, trace, audit, DNSSEC, benchmark, reverse, optionally through *this* server. |
+| **Account** | Change username and password (other sessions are signed out). |
+
+The top bar has the protection switch (enable, or pause for 10 min / 1 h / 24 h / until re-enabled) and a dark/light theme toggle.
+
+### How the pieces connect
+
+```mermaid
+flowchart LR
+    subgraph CLIENTS["Your network"]
+        C1["Laptops, phones, services"]
+    end
+
+    subgraph PROC["one dnslens process"]
+        DNS["DNS server<br/>UDP + TCP"]
+        OBS["Query observer"]
+        Q["Writer thread<br/>batched inserts"]
+        MGR["Manager<br/>settings, lists, rewrites, rules"]
+        WEB["Web server<br/>sessions, JSON API, static UI"]
+    end
+
+    DB[("queries.db<br/>SQLite")]
+    CFG[("config.json<br/>0600")]
+    FLT[("filters/*.txt")]
+    UP["Upstream resolvers"]
+    BR["Your browser"]
+
+    C1 -->|"DNS queries"| DNS
+    DNS -->|"cache miss"| UP
+    DNS --> OBS --> Q --> DB
+    BR -->|"HTTPS or HTTP"| WEB
+    WEB --> MGR
+    WEB -->|"statistics, log search"| DB
+    MGR -->|"rebuild zone, hot swap"| DNS
+    MGR --> CFG
+    MGR --> FLT
+```
+
+Query logging never slows DNS down: the DNS path only drops an event into a bounded in-memory queue; a separate thread writes batches to SQLite (WAL mode). If the queue ever overflows, events are dropped and counted rather than blocking answers.
+
+### What happens to a query
+
+Rules are applied in this order, and the first match wins:
+
+```mermaid
+flowchart TD
+    Q["query for NAME"] --> RW{"DNS rewrite or<br/>static record for NAME?"}
+    RW -- "yes" --> LOCAL["answer locally<br/>status: Local"]
+    RW -- "no" --> PR{"protection enabled?"}
+    PR -- "paused" --> FWD
+    PR -- "on" --> AL{"allow rule matches NAME<br/>or a parent domain?"}
+    AL -- "yes" --> FWD
+    AL -- "no" --> BL{"block rule matches NAME<br/>or a parent domain?"}
+    BL -- "yes" --> BLOCKED["NXDOMAIN or 0.0.0.0<br/>status: Blocked<br/>log keeps rule + list"]
+    BL -- "no" --> FWD["cache, then upstream<br/>status: Cached or Resolved"]
+```
+
+- **Allow beats block**, so `@@||example.org^` always wins, even against a list. A *custom* block rule beats a list's allow rule for the same domain.
+- A rule for a domain covers its subdomains. `||ads.example.com^` blocks `x.ads.example.com` too.
+- Unblocking from the query log adds an `@@||domain^` rule; blocking adds `||domain^` (and removes the opposite rule if present).
+
+### Blocklist formats
+
+| Format | Example | Notes |
+|---|---|---|
+| AdGuard / ABP | `\|\|ads.example.com^` | `$important` accepted; other modifiers (`$dnsrewrite`, `$client`, regex, cosmetic rules) are skipped and counted |
+| Allow rule | `@@\|\|good.example.com^` | overrides every block rule |
+| Hosts file | `0.0.0.0 ads.example.com` | `localhost` style entries ignored |
+| Plain domains | `ads.example.com` | one per line |
+
+Lists are downloaded over HTTP(S) (max 64 MB each), validated, stored under `filters/` and re-downloaded on the interval you choose. A list that fails to download keeps its previous rules and shows the error. Built-in presets: AdGuard DNS filter, StevenBlack unified hosts, Peter Lowe's ad servers.
+
+### Sign-in, sessions and CSRF
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Browser
+    participant W as Web server
+    participant M as Manager
+
+    U->>W: POST /api/login {username, password}
+    W->>W: failed 5 times in 5 min from this IP? answer 429
+    W->>M: verify (PBKDF2, constant-time compare)
+    M-->>W: ok
+    W-->>U: 200 + Set-Cookie session (HttpOnly, SameSite=Strict, Secure on HTTPS)
+    U->>W: GET /api/stats (cookie)
+    W-->>U: 200 JSON
+    U->>W: PUT /api/settings (cookie, X-Requested-With: dnslens, Origin = Host)
+    W->>W: custom header + same-origin check, then validate input
+    W->>M: apply and persist
+    M-->>U: 200 JSON
+```
+
+### Data directory
+
+Everything the UI manages lives in one directory (`--data-dir`; default `%APPDATA%\dnslens` on Windows, `~/.local/share/dnslens` elsewhere). It is created with owner-only permissions because it holds client IPs and your password hash.
+
+```text
+config.json    settings, lists, rewrites, custom rules, password hash   (written atomically, 0600)
+queries.db     query log + statistics (SQLite, WAL)
+filters/N.txt  downloaded blocklists
+```
+
+**Static vs managed configuration.** `-c zone.json`, `--record`, `--block`, `--blocklist` and `--authoritative` still work and are layered *under* what you manage in the UI (they show up as "static configuration" and are read-only there). Flags such as `--upstream`, `--cache-size`, `--max-ttl`, `--no-forward` and `--block-mode` only **seed** `config.json` the first time; afterwards the UI's settings win.
+
+### Web options
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--web` | off | Enable the UI |
+| `--web-host` / `--web-port` | `127.0.0.1` / `8080` | UI bind address and port |
+| `--data-dir DIR` | per-user | Where state lives |
+| `--web-user` / `--web-password` | `admin` / generated | Set credentials (password also via `DNSLENS_WEB_PASSWORD`) |
+| `--web-cert` / `--web-key` | none | PEM files; serve the UI over HTTPS (TLS 1.2+, HSTS, `Secure` cookie) |
+
+### Behind a reverse proxy
+
+Terminate TLS in front and keep the original `Host` header (the same-origin check compares `Origin` with `Host`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name dns.example.com;
+    # ssl_certificate / ssl_certificate_key ...
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Comparison with AdGuard Home
+
+| | dnslens web UI | AdGuard Home |
+|---|---|---|
+| Dashboard, charts, top lists | yes | yes |
+| Query log with search and filters | yes | yes |
+| Blocklist subscriptions, custom rules, check host | yes (AdGuard/hosts/domain syntax subset) | yes (full syntax) |
+| DNS rewrites, wildcards | yes | yes |
+| Pause protection with a timer | yes | yes |
+| Upstream test, cache, retention, anonymization | yes | yes |
+| Built-in diagnostics (propagation, trace, audit, DNSSEC) | **yes** | no |
+| Prometheus probes / REST for automation | **yes** (`dnslens api`) | partial |
+| DoH / DoT / DoQ listeners | no | yes |
+| DHCP server | no | yes |
+| Per-client settings, parental control, safe search | no | yes |
+| Install | `pip install dnslens` (Python 3.9+) | single binary |
+
+dnslens is a good fit for developers, home labs and small networks that already use Python tooling; it is not a drop-in replacement for AdGuard Home's full feature set.
+
 ## HTTP API: `dnslens api`
 
 A JSON API over every tool, plus Prometheus-format probes. Pure standard library (`http.server`), so it has no extra dependencies.
@@ -857,6 +1061,7 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 ## Security notes
 
 - **`serve`** binds to loopback by default. Binding anywhere else limits clients to private ranges (RFC 1918, ULA, link-local, CGNAT, loopback) unless you pass `--allow`. Open resolvers are abused for DDoS amplification, so do not expose it to the internet. AXFR/IXFR are refused. There is no rate limiting.
+- **Web UI.** Binds to loopback by default; on other addresses it warns when TLS is off. Sign-in uses PBKDF2-SHA256 (240k iterations), constant-time comparison, a lockout after 5 failed attempts in 5 minutes per IP, `HttpOnly` + `SameSite=Strict` session cookies (24 h sliding), and sessions are invalidated when the password changes. State-changing requests need a custom header and a same-origin `Origin`. Responses carry a strict Content-Security-Policy (no inline scripts), `X-Frame-Options: DENY`, `nosniff` and `no-referrer`. All DNS-derived text (domains from clients!) is rendered with `textContent`, never `innerHTML`; this is covered by a test that sends a hostile name. List URLs must be `http(s)`; the admin is trusted to choose them, so do not expose the UI to people you would not trust with outbound HTTP requests from this host.
 - **`api`** binds to loopback by default and warns when you bind elsewhere without `--token`. Token comparison is constant-time. Callers can only use resolvers you registered (plus the public set) unless `--allow-custom-resolver` is set, which prevents using it to send packets to arbitrary hosts. Inputs are validated and clamped, and concurrency is capped. It speaks plain HTTP: put it behind a TLS reverse proxy if it leaves localhost.
 - Zone and blocklist files are data only; nothing is executed.
 - Reports from `audit` and `propagate` reveal what public DNS says about a domain. They contain nothing secret, but the API makes your host perform those queries on request.
@@ -871,6 +1076,10 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 | `propagate` says INCONSISTENT for a CDN hostname | Round-robin / GeoDNS answers differ legitimately. Use `--expect` with the full set, or `--subset` with `wait`. |
 | Some public resolvers show `FAIL timeout` | Your network blocks UDP/53 to them. They are ignored unless `--strict`. Try `--transport tcp` or `tls`. |
 | `audit` reports an unreachable IPv6 nameserver | Only a `WARN`: the host may lack IPv6 connectivity. |
+| Forgot the web UI password | Restart with `--web-password 'new passphrase'` (it is stored hashed). The data directory keeps everything else. |
+| Dashboard is empty | Query logging is switched off in Settings, or no client uses this server yet. Test with `dnslens query example.com -r 127.0.0.1#5353`. |
+| A blocklist cannot be downloaded | The host has no outbound HTTP(S), or the URL is wrong. The error is shown on the Filters page; the list keeps its old rules. |
+| UI says `cross-origin request refused` behind a proxy | Pass the original `Host` header (`proxy_set_header Host $host;`). |
 | `--transport https` fails with `NoDOH` | Install the extra: `pip install "dnslens[doh]"`. |
 | Colours look broken in a log file | Colour is only used on a TTY. Set `NO_COLOR=1` or pass `--no-color`. |
 | Server answers `REFUSED` | Your client is outside `--allow`, or `--no-forward` is set and the name is not local. |
@@ -882,6 +1091,8 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 - Wildcards match at any depth (a deliberate, dnsmasq-like simplification of RFC 4592).
 - `trace` uses a built-in list of root server addresses and IPv4 glue first; an IPv6-only network may need the system resolver for glueless delegations.
 - Zone files are JSON, not RFC 1035 master files.
+- The web UI is a single-admin panel: no multi-user roles, no per-client rules, no DHCP, no DoH/DoT/DoQ listeners. Blocklist support covers the DNS-relevant subset of AdGuard syntax (see the table above).
+- The query log lives in SQLite; for very busy resolvers (millions of queries a day) use a short retention.
 
 ## Development and releasing
 
@@ -891,7 +1102,12 @@ pip install -e ".[dev]"
 pytest && ruff check src tests && mypy src
 ```
 
-The tests start an in-process fake DNS server on localhost and need no network. CI runs lint, type checks and the tests on Ubuntu, Windows and macOS for Python 3.9 to 3.13.
+The tests start an in-process fake DNS server on localhost and need no network. CI (on pushes to `main`/`master` and on pull requests) runs lint, type checks and the tests on Ubuntu, Windows and macOS for Python 3.9 to 3.13, plus a web UI smoke test.
+
+```bash
+# optional: UI smoke test (needs Node 20+)
+cd tests/ui && npm install && cd ../.. && bash tests/ui/run.sh
+```
 
 ```text
 src/dnslens/
@@ -902,9 +1118,15 @@ src/dnslens/
   dnssec.py    DS / DNSKEY / RRSIG check
   server.py    DNS server, zone data, cache, reloader
   api.py       HTTP API, probes, metrics
+  manage.py    runtime-managed settings, lists, rewrites, accounts (web UI back end)
+  web.py       web server: sessions, CSRF, JSON API for the UI
+  querylog.py  SQLite query log + statistics
+  filters.py   blocklist parsing and subscriptions
+  webui/       the single-page app (index.html, app.js, charts.js, style.css)
   cli.py       argparse front end
   output.py    tables, colour (Windows-safe)
 tests/         fake-server based tests
+tests/ui/      browser-less (jsdom) smoke test of the web UI against a live stack
 .github/workflows/  ci.yml, release.yml
 ```
 

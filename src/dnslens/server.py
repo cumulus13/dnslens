@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import socket
 import socketserver
 import struct
@@ -68,6 +69,17 @@ def _name(text: str) -> dns.name.Name:
         raise ConfigError(f"invalid name {text!r}: {e}") from e
 
 
+_DOMAIN_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_.-]{0,251}[a-z0-9_])?$")
+
+
+def norm_domain(text: str) -> Optional[str]:
+    """Lower-case ASCII hostname without wildcard/trailing dot, or None if invalid."""
+    t = text.strip().lower().lstrip("*.").rstrip(".")
+    if not t or ".." in t or not _DOMAIN_RE.match(t):
+        return None
+    return t
+
+
 def _txt_text(data: str) -> str:
     if data.lstrip().startswith('"'):
         return data
@@ -81,7 +93,8 @@ class ZoneData:
         self.wild: Dict[dns.name.Name, Node] = {}  # keyed by the parent of "*"
         self.ent: Set[dns.name.Name] = set()  # empty non-terminals
         self.auth: List[dns.name.Name] = []
-        self.block: Set[dns.name.Name] = set()
+        self.block: Dict[str, int] = {}  # domain -> source id (0 static, -1 custom rule, >0 filter list)
+        self.allow: Dict[str, int] = {}
         self.block_mode = "nxdomain"  # or "null"
 
     # ---- building ----
@@ -91,7 +104,7 @@ class ZoneData:
             rdtype = dns.rdatatype.from_text(rtype_text.upper())
             if rdtype == dns.rdatatype.TXT:
                 data_text = _txt_text(data_text)
-            rdata = dns.rdata.from_text(IN, rdtype, data_text)
+            rdata = dns.rdata.from_text(IN, rdtype, data_text, origin=dns.name.root, relativize=False)
         except Exception as e:
             raise ConfigError(f"bad {rtype_text} record for {name_text}: {data_text!r}: {e}") from e
         is_wild = bool(name.labels) and name.labels[0] == b"*"
@@ -110,10 +123,28 @@ class ZoneData:
             cur = cur.parent()
             self.ent.add(cur)
 
-    def add_block(self, text: str) -> None:
-        text = text.strip().lstrip("*.").rstrip(".")
-        if text and text.lower() not in _IGNORED_BLOCK_NAMES:
-            self.block.add(_name(text))
+    def add_block(self, text: str, source: int = 0) -> bool:
+        d = norm_domain(text)
+        if d is None or d in _IGNORED_BLOCK_NAMES:
+            return False
+        self.block.setdefault(d, source)
+        return True
+
+    def add_allow(self, text: str, source: int = 0) -> bool:
+        d = norm_domain(text)
+        if d is None:
+            return False
+        self.allow.setdefault(d, source)
+        return True
+
+    def copy(self) -> ZoneData:
+        z = ZoneData()
+        z.block_mode, z.auth, z.ent = self.block_mode, list(self.auth), set(self.ent)
+        z.block, z.allow = dict(self.block), dict(self.allow)
+        for src, dst in ((self.nodes, z.nodes), (self.wild, z.wild)):
+            for k, node in src.items():
+                dst[k] = {t: rr.copy() for t, rr in node.items()}
+        return z
 
     # ---- lookup ----
     def find(self, name: dns.name.Name) -> Optional[Node]:
@@ -121,7 +152,7 @@ class ZoneData:
         if node is not None:
             return node
         cur = name
-        while cur != dns.name.root:
+        while cur != dns.name.root and len(cur.labels) > 1:
             cur = cur.parent()
             w = self.wild.get(cur)
             if w:
@@ -136,21 +167,37 @@ class ZoneData:
     def is_authoritative(self, name: dns.name.Name) -> bool:
         return any(name.is_subdomain(a) for a in self.auth)
 
-    def is_blocked(self, name: dns.name.Name) -> bool:
+    def match(self, name: dns.name.Name) -> Optional[Tuple[str, str, int]]:
+        """Filtering verdict for a name: ('allow'|'block', matched rule domain, source id) or None.
+
+        A rule for a domain also covers its subdomains; allow rules win over block rules.
+        """
         if not self.block:
-            return False
-        cur = name
+            return None
+        s = name.to_text(omit_final_dot=True).lower()
+        cands = []
         while True:
-            if cur in self.block:
-                return True
-            if cur == dns.name.root:
-                return False
-            cur = cur.parent()
+            cands.append(s)
+            i = s.find(".")
+            if i < 0:
+                break
+            s = s[i + 1 :]
+        for c in cands:
+            if c in self.allow:
+                return ("allow", c, self.allow[c])
+        for c in cands:
+            if c in self.block:
+                return ("block", c, self.block[c])
+        return None
+
+    def is_blocked(self, name: dns.name.Name) -> bool:
+        m = self.match(name)
+        return m is not None and m[0] == "block"
 
     def counts(self) -> Dict[str, int]:
         n = sum(len(rr) for node in self.nodes.values() for rr in node.values())
         n += sum(len(rr) for node in self.wild.values() for rr in node.values())
-        return {"records": n, "blocked": len(self.block)}
+        return {"records": n, "blocked": len(self.block), "allowed": len(self.allow)}
 
 
 _CONFIG_KEYS = {"ttl", "records", "authoritative", "block", "blocklists", "block_mode", "upstream"}
@@ -224,7 +271,8 @@ def build_zone(
     for a in list(cfg.get("authoritative", [])) + list(authoritative):
         z.auth.append(_name(a))
     for b in list(cfg.get("block", [])) + list(blocks):
-        z.add_block(b)
+        if not z.add_block(b) and norm_domain(b) is None:
+            raise ConfigError(f"invalid block entry {b!r}")
     files = [os.path.join(base_dir, f) for f in cfg.get("blocklists", [])] + list(blocklist_files)
     for f in files:
         try:
@@ -250,6 +298,7 @@ class CacheEntry:
     ad: bool
     stored: float
     ttl: int
+    upstream: str = ""
 
     @classmethod
     def from_message(cls, msg: dns.message.Message, max_ttl: int) -> CacheEntry:
@@ -352,12 +401,42 @@ class ServerOptions:
     log_queries: bool = False
 
 
+@dataclass
+class QueryEvent:
+    """One handled query, delivered to observers (query log, statistics)."""
+
+    ts: float
+    client: str
+    qname: str
+    qtype: str
+    rcode: str
+    source: str  # local | blocked | cache | upstream | servfail | refused | error | ...
+    elapsed_ms: float
+    transport: str = "udp"
+    upstream: str = ""
+    rule: str = ""
+    list_id: int = 0
+    answers: List[str] = field(default_factory=list)
+
+
 class DNSHandler:
     def __init__(self, zone: ZoneData, opts: Optional[ServerOptions] = None) -> None:
         self.zone = zone
         self.opts = opts or ServerOptions()
         self.cache = Cache(self.opts.cache_size)
         self.stats = Stats()
+        self.observers: List[Callable[[QueryEvent], None]] = []
+        self.protection = True
+        self.protection_until = 0.0  # epoch seconds; 0 = until re-enabled manually
+        self.started = time.time()
+
+    def protection_active(self) -> bool:
+        if self.protection:
+            return True
+        if self.protection_until and time.time() >= self.protection_until:
+            self.protection, self.protection_until = True, 0.0
+            return True
+        return False
 
     # ---- helpers ----
     def set_zone(self, zone: ZoneData) -> None:
@@ -408,8 +487,9 @@ class DNSHandler:
         self.stats.inc("queries")
         if tcp:
             self.stats.inc("tcp")
+        info: Dict[str, str] = {}
         try:
-            r, source = self._build(q, client)
+            r, source = self._build(q, client, info)
         except Exception:
             log.exception("internal error handling query from %s", client)
             r = self._new_response(q)
@@ -426,9 +506,34 @@ class DNSHandler:
             log.info("%s %s %s -> %s %s %.1fms", client, qq.name.to_text(),
                      dns.rdatatype.to_text(qq.rdtype), dns.rcode.to_text(r.rcode()), source,
                      (time.perf_counter() - t0) * 1000)
+        if self.observers and q.question:
+            self._notify(q, r, client, source, info, tcp, (time.perf_counter() - t0) * 1000)
         return self._encode(r, q, tcp)
 
-    def _build(self, q: dns.message.Message, client: str) -> Tuple[dns.message.Message, str]:
+    def _notify(self, q: dns.message.Message, r: dns.message.Message, client: str, source: str,
+                info: Dict[str, str], tcp: bool, ms: float) -> None:
+        try:
+            qq = q.question[0]
+            answers = []
+            for rr in r.answer:
+                t = dns.rdatatype.to_text(rr.rdtype)
+                for rd in rr:
+                    answers.append(f"{t} {rd.to_text()}"[:200])
+                    if len(answers) >= 8:
+                        break
+            ev = QueryEvent(
+                ts=time.time(), client=client.split("%", 1)[0], qname=qq.name.to_text(omit_final_dot=True).lower() or ".",
+                qtype=dns.rdatatype.to_text(qq.rdtype), rcode=dns.rcode.to_text(r.rcode()), source=source,
+                elapsed_ms=ms, transport="tcp" if tcp else "udp", upstream=info.get("upstream", ""),
+                rule=info.get("rule", ""), list_id=int(info.get("list", "0") or 0), answers=answers,
+            )
+            for ob in self.observers:
+                ob(ev)
+        except Exception:
+            log.debug("observer failed", exc_info=True)
+
+    def _build(self, q: dns.message.Message, client: str, info: Optional[Dict[str, str]] = None) -> Tuple[dns.message.Message, str]:
+        info = info if info is not None else {}
         r = self._new_response(q)
         if not self._allowed(client):
             r.set_rcode(dns.rcode.REFUSED)
@@ -447,7 +552,15 @@ class DNSHandler:
         name, rtype = qn.name, qn.rdtype
         do = bool(q.ednsflags & dns.flags.DO) if q.edns >= 0 else False
 
-        if zone.is_blocked(name):
+        handled = self._local(zone, r, name, rtype, do)
+        if handled:
+            self.stats.inc("local")
+            return r, "local"
+
+
+        verdict = zone.match(name) if self.protection_active() else None
+        if verdict is not None and verdict[0] == "block":
+            info["rule"], info["list"] = verdict[1], str(verdict[2])
             self.stats.inc("blocked")
             if zone.block_mode == "null" and rtype in (dns.rdatatype.A, dns.rdatatype.AAAA):
                 addr = "0.0.0.0" if rtype == dns.rdatatype.A else "::"
@@ -457,15 +570,10 @@ class DNSHandler:
                 r.set_rcode(dns.rcode.NXDOMAIN)
             return r, "blocked"
 
-        handled = self._local(zone, r, name, rtype, do)
-        if handled:
-            self.stats.inc("local")
-            return r, "local"
-
         if not self.opts.forward:
             r.set_rcode(dns.rcode.REFUSED)
             return r, "refused"
-        entry, from_cache = self._forward(name, rtype, do)
+        entry, from_cache = self._forward(name, rtype, do, info)
         if entry is None:
             r.set_rcode(dns.rcode.SERVFAIL)
             return r, "servfail"
@@ -515,13 +623,16 @@ class DNSHandler:
         return True
 
     # ---- forwarding ----
-    def _forward(self, name: dns.name.Name, rtype: int, do: bool) -> Tuple[Optional[CacheEntry], bool]:
+    def _forward(self, name: dns.name.Name, rtype: int, do: bool,
+                 info: Optional[Dict[str, str]] = None) -> Tuple[Optional[CacheEntry], bool]:
         key = (name, rtype, do)
         hit = self.cache.get(key)
         if hit is not None:
             self.stats.inc("cache_hit")
             entry, (ans, auth, add) = hit
-            copy = CacheEntry(entry.rcode, ans, auth, add, entry.ad, entry.stored, entry.ttl)
+            copy = CacheEntry(entry.rcode, ans, auth, add, entry.ad, entry.stored, entry.ttl, entry.upstream)
+            if info is not None:
+                info["upstream"] = entry.upstream
             return copy, True
         qopts = QueryOpts(timeout=self.opts.upstream_timeout, retries=0, dnssec=do)
         for up in self.opts.upstreams:
@@ -531,6 +642,9 @@ class DNSHandler:
             ):
                 self.stats.inc("upstream")
                 entry = CacheEntry.from_message(a.message, self.opts.max_ttl)
+                entry.upstream = up
+                if info is not None:
+                    info["upstream"] = up
                 self.cache.put(key, entry)
                 return entry, False
             log.debug("upstream %s failed for %s: %s", up, name, a.error or a.rcode)

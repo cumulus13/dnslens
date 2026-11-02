@@ -46,7 +46,8 @@ class Raw:
 @dataclass
 class ApiConfig:
     token: Optional[str] = None
-    resolvers: Dict[str, Target] = field(default_factory=dict)  # extra named resolvers (-r)
+    resolvers: Dict[str, Target] = field(default_factory=dict)  # named resolvers (-r), also the defaults
+    extra: Dict[str, Target] = field(default_factory=dict)  # selectable by name but never a default
     allow_custom: bool = False
     default_timeout: float = 3.0
     max_concurrent: int = 16
@@ -55,6 +56,7 @@ class ApiConfig:
     def registry(self) -> Dict[str, Target]:
         reg = {t.name: t for t in PUBLIC_RESOLVERS}
         reg["system"] = SYSTEM
+        reg.update(self.extra)
         reg.update(self.resolvers)
         return reg
 

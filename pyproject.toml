@@ -7,8 +7,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dnslens"
-version = "1.0.2"
-description = "Cross-platform DNS toolkit for developers and DevOps: query, trace, propagation, audit, DNSSEC, local DNS server and HTTP/Prometheus API."
+version = "1.0.3"
+description = "Cross-platform DNS toolkit for developers and DevOps: query, trace, propagation, audit, DNSSEC, local DNS server with an AdGuard Home style web UI, and an HTTP/Prometheus API."
 readme = "README.md"
 requires-python = ">=3.9"
 license-files = [
@@ -20,6 +20,10 @@ authors = [
 keywords = [
     "dns",
     "dns-server",
+    "adguard",
+    "ad-blocker",
+    "web-ui",
+    "dashboard",
     "prometheus",
     "blocklist",
     "devops",
@@ -65,7 +69,7 @@ dev = [
 [project.urls]
 Homepage = "https://github.com/cumulus13/dnslens"
 Issues = "https://github.com/cumulus13/dnslens/issues"
-Changelog = "https://github.com/cumulus13/dnslens/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/cumulus13/dnslens/blob/master/CHANGELOG.md"
 
 [project.scripts]
 dnslens = "dnslens.cli:main"
@@ -78,6 +82,7 @@ where = [
 [tool.setuptools.package-data]
 dnslens = [
     "py.typed",
+    "webui/*",
 ]
 
 [tool.pytest.ini_options]

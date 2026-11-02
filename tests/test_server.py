@@ -235,7 +235,7 @@ def test_cli_records_and_blocklist(tmp_path):
     bl.write_text("# c\n127.0.0.1 localhost\n0.0.0.0 tracker.test ads2.test\nplain.test\n")
     assert list(parse_blocklist(bl.read_text())) == ["localhost", "tracker.test", "ads2.test", "plain.test"]
     z = build_zone(records=["svc.test A 1.2.3.4", "svc.test TXT v=1 ok"], blocklist_files=[str(bl)])
-    assert z.counts() == {"records": 2, "blocked": 3}  # localhost ignored
+    assert z.counts() == {"records": 2, "blocked": 3, "allowed": 0}  # localhost ignored
 
 
 def test_hot_reload(tmp_path, up):
@@ -253,3 +253,12 @@ def test_hot_reload(tmp_path, up):
         p.write_text("{broken")
         assert not rl.check()  # keeps previous config
         assert ask(s, "a.test").answer[0][0].address == "2.2.2.2"
+
+
+def test_relative_names_in_rdata_are_absolute(up):
+    z = build_zone(records=["a.test CNAME b.test", "a2.test MX 10 mail.test", "b.test A 10.1.1.1"])
+    h = DNSHandler(z, ServerOptions(forward=False))
+    with DNSServer(h, "127.0.0.1", 0).start() as s:
+        r = ask(s, "a.test", "A")
+        assert [dns.rdatatype.to_text(x.rdtype) for x in r.answer] == ["CNAME", "A"]
+        assert ask(s, "a2.test", "MX").answer[0][0].exchange.to_text() == "mail.test."

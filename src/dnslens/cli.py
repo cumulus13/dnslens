@@ -26,6 +26,7 @@ from .core import (
     query_target,
 )
 from .dnssec import check_dnssec
+from .manage import Manager, default_data_dir
 from .output import Style, emit_json, render_table, setup_streams, supports_color
 from .server import (
     DEFAULT_UPSTREAMS,
@@ -40,6 +41,7 @@ from .server import (
 )
 from .tools import DEFAULT_BENCH_DOMAINS, bench, propagate, wait
 from .trace import trace
+from .web import WebServer
 
 
 def _common() -> argparse.ArgumentParser:
@@ -130,6 +132,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--watch", action="store_true", help="hot-reload config/blocklist files when they change")
     s.add_argument("--log-queries", action="store_true")
     s.add_argument("-v", "--verbose", action="store_true")
+    w = s.add_argument_group("web management UI")
+    w.add_argument("--web", action="store_true", help="enable the web UI (statistics, query log, filters, rewrites, settings)")
+    w.add_argument("--web-host", default="127.0.0.1", help="UI bind address (127.0.0.1)")
+    w.add_argument("--web-port", type=int, default=8080, help="UI port (8080)")
+    w.add_argument("--data-dir", metavar="DIR", help="where UI settings, filters and the query log live (per-user default)")
+    w.add_argument("--web-user", help="set the admin username")
+    w.add_argument("--web-password", default=os.environ.get("DNSLENS_WEB_PASSWORD"),
+                   help="set the admin password (or env DNSLENS_WEB_PASSWORD); default: generated once and printed")
+    w.add_argument("--web-cert", metavar="FILE", help="TLS certificate (PEM) to serve the UI over HTTPS")
+    w.add_argument("--web-key", metavar="FILE", help="TLS private key (PEM)")
 
     s = sub.add_parser("api", help="run the HTTP API (JSON + Prometheus probe endpoints)")
     s.add_argument("--host", default="127.0.0.1")
@@ -366,10 +378,34 @@ def cmd_serve(a: argparse.Namespace, st: Style) -> int:
         log.info("clients limited to: %s", ", ".join(str(n) for n in opts.allow))
     elif a.host not in ("127.0.0.1", "::1"):
         log.warning("no client ACL on a non-loopback address: this is an open resolver")
+    manager = web = None
+    if a.web:
+        try:
+            seed = {"upstreams": list(opts.upstreams), "upstream_timeout": opts.upstream_timeout, "forward": opts.forward,
+                    "cache_size": opts.cache_size, "max_ttl": opts.max_ttl, "block_mode": a.block_mode or zone.block_mode}
+            loopback = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(a.host, a.host)
+            manager = Manager(a.data_dir or default_data_dir(), handler, zone, seed, dns_addr=f"{a.host}:{server.port}")
+            manager.start(password=a.web_password, username=a.web_user)
+            web = WebServer(manager, a.web_host, a.web_port, a.web_cert, a.web_key, local_dns=f"{loopback}#{server.port}")
+            web.start()
+        except (OSError, ValueError, ConfigError) as e:
+            print(f"dnslens: cannot start the web UI: {e}", file=sys.stderr)
+            if manager:
+                manager.stop()
+            server.stop()
+            return 1
+        scheme = "https" if web.tls else "http"
+        log.info("web UI: %s://%s:%d  (data in %s)", scheme, a.web_host if ":" not in a.web_host else f"[{a.web_host}]", web.port, manager.data_dir)
+        if manager.initial_password:
+            log.warning("first start: sign in as '%s' with password '%s' (change it on the Account page)",
+                        manager.cfg["auth"]["username"], manager.initial_password)
+        if a.web_host not in ("127.0.0.1", "::1", "localhost") and not web.tls:
+            log.warning("the web UI is reachable over plain HTTP: use --web-cert/--web-key or a TLS reverse proxy")
     reloader = None
     if a.watch:
         paths = ([a.config] if a.config else []) + list(a.blocklist)
-        reloader = Reloader(paths, loader, handler.set_zone).start()
+        apply = manager.set_static if manager else handler.set_zone
+        reloader = Reloader(paths, loader, apply).start()
     try:
         while True:
             time.sleep(0.5)
@@ -378,6 +414,10 @@ def cmd_serve(a: argparse.Namespace, st: Style) -> int:
     finally:
         if reloader:
             reloader.stop()
+        if web:
+            web.stop()
+        if manager:
+            manager.stop()
         server.stop()
         log.info("stats: %s", " ".join(f"{k}={v}" for k, v in handler.stats.snapshot().items()))
     return 0
