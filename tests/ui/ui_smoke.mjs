@@ -8,6 +8,31 @@ const dom = new JSDOM(html, {
   url: base + "/", runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
   beforeParse(w) {
     w.matchMedia = () => ({ matches: false });
+    if (!process.env.UI_NO_SSE) {
+      // jsdom has no EventSource: a small stand-in on top of fetch streaming
+      w.EventSource = class {
+        constructor(url) { this.url = url; this.l = {}; this.readyState = 0; this.ctrl = new AbortController(); this._run().catch(() => { if (this.onerror) this.onerror(); }); }
+        addEventListener(t, f) { (this.l[t] = this.l[t] || []).push(f); }
+        close() { this.readyState = 2; this.ctrl.abort(); }
+        async _run() {
+          const r = await fetch(new URL(this.url, base), { headers: { Cookie: cookie }, signal: this.ctrl.signal });
+          if (!r.ok) throw new Error("status " + r.status);
+          this.readyState = 1;
+          const reader = r.body.getReader(), dec = new TextDecoder(); let buf = "";
+          for (;;) {
+            const { done, value } = await reader.read(); if (done) break;
+            buf += dec.decode(value, { stream: true });
+            let i;
+            while ((i = buf.indexOf("\n\n")) >= 0) {
+              const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+              let ev = "message", data = "";
+              for (const line of frame.split("\n")) { if (line.startsWith("event:")) ev = line.slice(6).trim(); else if (line.startsWith("data:")) data += line.slice(5).trim(); }
+              if (data) (this.l[ev] || []).forEach((f) => f({ data }));
+            }
+          }
+        }
+      };
+    }
     w.confirm = () => true;
     w.scrollTo = () => {};
     w.addEventListener("error", (e) => errors.push("window error: " + (e.error?.stack || e.message)));
@@ -54,6 +79,30 @@ check(d.querySelectorAll(".chart svg rect.b-resolved").length > 0 && d.querySele
 await waitFor(() => d.querySelectorAll(".donut svg").length === 2, "two donut charts");
 check(text().includes("ads.bad.test"), "top blocked lists ads.bad.test");
 check(text().includes("Upstream servers") && text().includes("ms"), "upstream section rendered");
+
+// ---- live dashboard ----
+const MODE = process.env.UI_NO_SSE ? "polling" : "SSE";
+await waitFor(() => d.getElementById("live-chart") && d.getElementById("live-chart").querySelector("svg"), "live chart");
+await waitFor(() => d.querySelectorAll("#live-feed tr").length > 0, "live feed rows");
+check(true, `[${MODE}] live chart and feed render`);
+await waitFor(() => Number(d.getElementById("live-qps").textContent.replace(/,/g, "")) > 0, "non-zero queries per second");
+check(true, `[${MODE}] queries/second indicator moves`);
+const liveLabel = () => d.querySelector("#live-chart").closest(".card").querySelector(".pill").textContent;
+console.log(`[${MODE}] state label: "${liveLabel()}"`);
+check(MODE === "SSE" ? liveLabel() === "live" : liveLabel() === "live (polling)", `[${MODE}] connection state label is correct`);
+check(d.querySelectorAll("#live-feed tr .badge").length > 0 && d.querySelectorAll("#live-feed [onerror]").length === 0, `[${MODE}] feed rows have status badges`);
+const qNum = () => Number(d.querySelector(".card.stat .v").textContent.replace(/,/g, ""));
+const q0 = qNum(); await sleep(3500); const q1 = qNum();
+check(q1 > q0, `[${MODE}] total-queries card ticks up live (${q0} -> ${q1})`);
+const rows0 = d.getElementById("live-feed").firstChild.textContent + d.querySelectorAll("#live-feed tr").length;
+d.getElementById("live-toggle").click();
+await waitFor(() => d.getElementById("live-toggle").textContent === "Resume", "paused");
+check(liveLabel().includes("paused"), `[${MODE}] pause shows the paused state`);
+const frozen = d.getElementById("live-feed").firstChild.textContent; await sleep(2200);
+check(d.getElementById("live-feed").firstChild.textContent === frozen, `[${MODE}] feed is frozen while paused`);
+d.getElementById("live-toggle").click();
+await waitFor(() => d.getElementById("live-toggle").textContent === "Pause" && d.getElementById("live-feed").firstChild.textContent !== frozen, "resumed with fresh rows");
+check(true, `[${MODE}] resume continues the live feed`);
 // hover tooltip
 const hov = d.querySelector(".chart rect.hov"); hov.dispatchEvent(new w.Event("mouseenter"));
 check(d.querySelector(".chart .tip").style.display === "block" && d.querySelector(".chart .tip").textContent.includes("Resolved"), "chart tooltip works");
@@ -77,7 +126,9 @@ check(true, "search narrows the log");
 
 // XSS: a hostile name sent by a DNS client must render as text
 await go("account"); await go("log"); await waitFor(() => d.querySelectorAll("tbody tr.click").length > 5, "log again");
-check(text().includes("xss.test"), "hostile domain is visible as literal text");
+const sbox = d.querySelector("input[type=search]"); sbox.value = "xss.test"; sbox.dispatchEvent(new w.Event("input"));
+await waitFor(() => { const rows = d.querySelectorAll("tbody tr.click"); return rows.length > 0 && [...rows].every((r) => r.textContent.includes("xss.test")); }, "search for the hostile name");
+check(text().includes("<img/src=x/onerror=alert"), "hostile domain is visible as literal text");
 check(d.querySelectorAll("img[src='x']").length === 0 && !d.querySelector("[onerror]"), "no element was injected from a DNS name");
 
 // filters
@@ -115,6 +166,7 @@ check(true, "upstream test runs");
 [...d.querySelectorAll("button")].find((b) => b.textContent === "Save settings").click();
 await waitFor(() => text().includes("Settings saved"), "settings saved");
 check(true, "settings save");
+check(text().includes("Storage (read only)") && text().includes("files in"), "settings shows where data is stored");
 
 // tools
 await go("tools");

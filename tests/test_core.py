@@ -1,3 +1,9 @@
+# File: dnslens/tests/test_core.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:19 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 import dns.rdatatype  # noqa: F401
 from conftest import zone_handler
 

@@ -1,3 +1,9 @@
+# File: dnslens/.github/workflows/release.yml
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:42:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 name: Release
 
 # Push a tag like v1.0.0 to publish to PyPI.

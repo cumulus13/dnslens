@@ -89,7 +89,10 @@
     if (!t) t = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     setTheme(t);
   })();
-  function stopTimers() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+  function stopTimers() {
+    if (state.timer) { clearInterval(state.timer); state.timer = null; }
+    if (state.live) { state.live.close(); state.live = null; }
+  }
 
   /* ---------- login ---------- */
   function renderLogin() {
@@ -165,43 +168,148 @@
   }
   window.addEventListener("hashchange", route);
 
+  /* ---------- live connection (Server-Sent Events, polling fallback) ---------- */
+  function openLive(h) {
+    var closed = false, es = null, poller = null, fallback = null, seq = 0, got = false, lastCheck = 0;
+    function poll() {
+      api("GET", "/api/live/poll?since=" + seq).then(function (r) {
+        if (closed) return;
+        seq = r.seq;
+        if (r.hello) h.hello(r); else r.ticks.forEach(h.tick);
+        h.status("polling");
+      }).catch(function () { if (!closed) h.status("offline"); });
+    }
+    function startPolling() { if (poller || closed) return; poll(); poller = setInterval(poll, 1000); }
+    function recheckSession() {
+      if (Date.now() - lastCheck < 5000) return;
+      lastCheck = Date.now();
+      api("GET", "/api/session").then(function (s) { if (!s.authenticated) { close(); state.user = null; renderLogin(); } }).catch(function () { });
+    }
+    function close() { closed = true; if (es) es.close(); if (poller) clearInterval(poller); clearTimeout(fallback); }
+    if (window.EventSource) {
+      es = new window.EventSource("/api/live");
+      fallback = setTimeout(function () { if (!got && !closed) { es.close(); es = null; startPolling(); } }, 5000); // buffering proxy?
+      es.addEventListener("hello", function (e) { got = true; var d = JSON.parse(e.data); seq = d.seq; h.hello(d); h.status("live"); });
+      es.addEventListener("tick", function (e) { got = true; var t = JSON.parse(e.data); seq = t.seq; h.tick(t); h.status("live"); });
+      es.addEventListener("bye", function () { close(); recheckSession(); });
+      es.onerror = function () { h.status("reconnecting"); recheckSession(); };
+    } else startPolling();
+    return { close: close };
+  }
+
   /* ---------- dashboard ---------- */
   function stat(cls, label, value, sub) {
-    return h("div", { class: "card stat " + cls }, h("div", { class: "l" }, label), h("div", { class: "v" }, value), h("div", { class: "s" }, sub || "\u00a0"));
+    var v = h("div", { class: "v" }, value), s2 = h("div", { class: "s" }, sub || "\u00a0");
+    var el = h("div", { class: "card stat " + cls }, h("div", { class: "l" }, label), v, s2);
+    el.setV = function (a, b) { v.textContent = a; if (b !== undefined) s2.textContent = b; };
+    return el;
   }
   function ruleAction(action, domain) {
     return api("POST", "/api/rules/action", { action: action, domain: domain })
       .then(function () { toast((action === "block" ? "Blocked " : "Allowed ") + domain); }).catch(fail);
   }
+  var LIVE_N = 120;
   function viewDashboard(c) {
-    var body = h("div");
+    var cardsBox = h("div"), liveBox = h("div"), rest = h("div");
     var seg = h("div", { class: "seg" });
     ["1h", "6h", "24h", "7d", "30d"].forEach(function (w) {
-      seg.appendChild(h("button", { class: state.win === w ? "on" : "", onclick: function () { state.win = w; viewDashboardInto(c); } }, w));
+      seg.appendChild(h("button", { class: state.win === w ? "on" : "", onclick: function () { state.win = w; stopTimers(); clear(c); viewDashboard(c); } }, w));
     });
     c.appendChild(h("div", { class: "row", style: "margin-bottom:12px" }, h("div", { class: "grow muted" }, "Statistics for the last"), seg));
-    c.appendChild(body);
-    load();
-    state.timer = setInterval(load, 10000);
+    c.appendChild(cardsBox); c.appendChild(liveBox); c.appendChild(rest);
+
+    /* ----- live section (built once; survives the 10 s statistics refresh) ----- */
+    var base = null, delta = { total: 0, blocked: 0, cache: 0 }, cards = null;
+    var ticks = [], hover = false, conn = null;
+    var liveOn = true; try { liveOn = localStorage.getItem("liveDash") !== "off"; } catch (e) { /* ignore */ }
+    var dot = h("span", { class: "dot off" }), stateLbl = h("span", { class: "muted" }, ""), qps = h("span", { class: "qps", id: "live-qps" }, "0"), peak = h("span", { class: "muted" }, "");
+    var toggleBtn = h("button", { class: "small", id: "live-toggle", onclick: function () { liveOn = !liveOn; try { localStorage.setItem("liveDash", liveOn ? "on" : "off"); } catch (e) { /* ignore */ } applyLiveState(); } });
+    var chartHost = h("div", { class: "chart", id: "live-chart" });
+    chartHost.addEventListener("mouseenter", function () { hover = true; });
+    chartHost.addEventListener("mouseleave", function () { hover = false; drawLive(); });
+    var feedBody = h("tbody", { id: "live-feed" });
+    var feedNote = h("div", { class: "hint" }, "");
+    liveBox.appendChild(h("div", { class: "grid g2" },
+      h("div", { class: "card" },
+        h("div", { class: "row", style: "justify-content:space-between;margin-bottom:8px" },
+          h("h2", { style: "margin:0" }, "Live traffic (last 2 minutes)"),
+          h("div", { class: "row" }, h("span", { class: "pill" }, dot, stateLbl), toggleBtn)),
+        h("div", { class: "row", style: "margin-bottom:6px;align-items:baseline" }, qps, h("span", { class: "muted" }, "queries/s"), peak),
+        chartHost),
+      h("div", { class: "card" }, h("h2", {}, "Live queries"),
+        h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Time"), h("th", {}, "Domain"), h("th", {}, "Status"), h("th", {}, "Client"))), feedBody)), feedNote)));
+
+    function drawLive() {
+      if (hover) return;
+      var cur = ticks.slice(-LIVE_N), pad = LIVE_N - cur.length, z = function () { return 0; };
+      var series = { bucket_seconds: 1, start: (cur.length ? cur[0].ts : Math.floor(Date.now() / 1000)) - pad,
+        total: new Array(pad).fill(0).concat(cur.map(function (t) { return t.total; })), blocked: new Array(pad).fill(0).concat(cur.map(function (t) { return t.blocked; })),
+        resolved: new Array(pad).fill(0).concat(cur.map(function (t) { return t.resolved; })), failed: new Array(pad).fill(0).concat(cur.map(function (t) { return t.failed; })) };
+      void z; Charts.timeline(chartHost, series);
+      var last = cur.length ? cur[cur.length - 1] : { total: 0 }, mx = 0;
+      cur.forEach(function (t) { if (t.total > mx) mx = t.total; });
+      qps.textContent = n(last.total); peak.textContent = "peak " + n(mx) + "/s";
+    }
+    function addEvents(evts, quiet) {
+      evts.forEach(function (e) {
+        var tr = h("tr", { class: quiet ? "" : "flash" },
+          h("td", { class: "muted" }, new Date(e.ts * 1000).toLocaleTimeString()),
+          h("td", { class: "mono" }, e.name, h("span", { class: "muted" }, " " + e.type)),
+          h("td", {}, h("span", { class: "badge " + e.source }, SRC[e.source] || e.source)),
+          h("td", { class: "mono" }, e.client));
+        feedBody.insertBefore(tr, feedBody.firstChild);
+      });
+      while (feedBody.children.length > 25) feedBody.removeChild(feedBody.lastChild);
+    }
+    function renderCards() {
+      if (!base || !cards) return;
+      var tot = base.queries + delta.total, bl = base.blocked + delta.blocked, ca = base.cache + delta.cache;
+      cards.q.setV(n(tot), "avg " + base.avg_ms + " ms");
+      cards.b.setV(n(bl), (tot ? Math.round(1000 * bl / tot) / 10 : 0) + "% of queries");
+      cards.c.setV(n(ca), (tot ? Math.round(1000 * ca / tot) / 10 : 0) + "% of queries");
+    }
+    function setStatus(st) {
+      dot.className = "dot" + (st === "live" || st === "polling" ? " pulse" : " off");
+      stateLbl.textContent = !liveOn ? "paused" : st === "live" ? "live" : st === "polling" ? "live (polling)" : st === "reconnecting" ? "reconnecting..." : "offline";
+    }
+    function applyLiveState() {
+      toggleBtn.textContent = liveOn ? "Pause" : "Resume";
+      if (conn) { conn.close(); conn = null; }
+      if (!liveOn) { setStatus("paused"); return; }
+      setStatus("connecting");
+      conn = openLive({
+        status: setStatus,
+        hello: function (d) { ticks = d.ticks.slice(); clear(feedBody); addEvents(d.events.slice(-25), true); drawLive(); },
+        tick: function (t) {
+          ticks.push(t); if (ticks.length > 300) ticks.shift();
+          delta.total += t.total; delta.blocked += t.blocked; delta.cache += t.cache;
+          if (t.events && t.events.length) addEvents(t.events, false);
+          feedNote.textContent = t.total > t.events.length ? "Busy: showing a sample of " + t.events.length + " of " + t.total + " queries from the last second." : "";
+          renderCards(); drawLive();
+        }
+      });
+      state.live = conn;
+    }
+
+    /* ----- statistics (refreshed every 10 s) ----- */
     function load() {
       Promise.all([api("GET", "/api/stats?window=" + state.win + "&top=10"), refreshStatus()]).then(function (res) {
-        var s = res[0];
-        var t = s.totals, st = state.status || { zone: {}, filters: {}, rewrites: 0 };
-        clear(body);
-        body.appendChild(h("div", { class: "grid g4" },
-          stat("acc", "DNS queries", n(t.queries), "avg " + t.avg_ms + " ms"),
-          stat("bad", "Blocked", n(t.blocked), t.blocked_pct + "% of queries"),
-          stat("ok", "Served from cache", n(t.cache), t.cache_pct + "% of queries"),
-          stat("info", "Blocking rules", n(st.zone.blocked), (st.filters.enabled || 0) + " lists, " + (st.rewrites || 0) + " rewrites")));
+        var s = res[0], t = s.totals, st = state.status || { zone: {}, filters: {}, rewrites: 0 };
+        base = t; delta = { total: 0, blocked: 0, cache: 0 };
+        cards = { q: stat("acc", "DNS queries", n(t.queries), "avg " + t.avg_ms + " ms"), b: stat("bad", "Blocked", n(t.blocked), t.blocked_pct + "% of queries"),
+          c: stat("ok", "Served from cache", n(t.cache), t.cache_pct + "% of queries"),
+          r: stat("info", "Blocking rules", n(st.zone.blocked), (st.filters.enabled || 0) + " lists, " + (st.rewrites || 0) + " rewrites") };
+        clear(cardsBox).appendChild(h("div", { class: "grid g4" }, cards.q, cards.b, cards.c, cards.r));
+        clear(rest);
         if (st.filters && !st.filters.total && !t.blocked) {
-          body.appendChild(h("div", { class: "card" }, "No blocklists yet. ", h("a", { href: "#/filters" }, "Add one on the Filters page"), " to start blocking ads and trackers."));
+          rest.appendChild(h("div", { class: "card" }, "No blocklists yet. ", h("a", { href: "#/filters" }, "Add one on the Filters page"), " to start blocking ads and trackers."));
         }
         var tl = h("div", { class: "chart" });
-        body.appendChild(h("div", { class: "card" }, h("h2", {}, "Queries over time"), tl));
+        rest.appendChild(h("div", { class: "card" }, h("h2", {}, "Queries over time"), tl));
         Charts.timeline(tl, s.series);
         var act = function (a) { return { label: a, fn: function (it) { ruleAction(a.toLowerCase(), it.name).then(function () { load(); }); } }; };
         var b1 = h("div"), b2 = h("div"), b3 = h("div"), b4 = h("div"), d1 = h("div"), d2 = h("div");
-        body.appendChild(h("div", { class: "grid g2" },
+        rest.appendChild(h("div", { class: "grid g2" },
           h("div", { class: "card" }, h("h2", {}, "Top queried domains"), b1),
           h("div", { class: "card" }, h("h2", {}, "Top blocked domains"), b2),
           h("div", { class: "card" }, h("h2", {}, "Top clients"), b3),
@@ -216,8 +324,11 @@
         Charts.donut(d2, s.rcodes);
       }).catch(function (e) { if (e.message !== "Session expired") fail(e); });
     }
+    drawLive();
+    applyLiveState();
+    load();
+    state.timer = setInterval(load, 10000);
   }
-  function viewDashboardInto(c) { stopTimers(); clear(c); viewDashboard(c); }
 
   /* ---------- query log ---------- */
   var SRC = { blocked: "Blocked", cache: "Cached", local: "Local", upstream: "Resolved", servfail: "Failed", error: "Failed", refused: "Refused" };
@@ -264,7 +375,7 @@
       }).catch(function (e) { if (e.message !== "Session expired") fail(e); });
     }
     load(false);
-    state.timer = setInterval(function () { if (live && !q.search) load(false); }, 3000);
+    state.timer = setInterval(function () { if (live && !q.search) load(false); }, 2000);
   }
 
   /* ---------- filters ---------- */
@@ -387,6 +498,11 @@
       c.appendChild(h("div", { class: "card" }, h("h2", {}, "Query log and statistics"),
         h("label", { class: "row", style: "margin-bottom:12px" }, logOn, "Record queries (turning this off stops statistics too)"),
         h("label", { class: "row", style: "margin-bottom:12px" }, anon, "Anonymize client IP addresses (last IPv4 octet / IPv6 suffix)"), field("Keep for", ret)));
+      c.appendChild(h("div", { class: "card" }, h("h2", {}, "Storage (read only)"),
+        h("div", {}, h("span", { class: "badge" }, s.storage.mode === "database" ? "Database" : "Files")),
+        h("p", {}, "Settings, blocklists, rewrites and the account: ", h("span", { class: "mono" }, s.storage.config)),
+        h("p", {}, "Query log and statistics: ", h("span", { class: "mono" }, s.storage.log)),
+        h("div", { class: "hint" }, "Chosen at startup with --data-dir or --db. Use `dnslens db migrate` to move file data into a database.")));
       c.appendChild(save);
     }).catch(fail);
   }

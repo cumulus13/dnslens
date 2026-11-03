@@ -1,3 +1,9 @@
+# File: dnslens/src/dnslens/dnssec.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Zone-level DNSSEC sanity check: DS <-> DNSKEY match and DNSKEY RRSIG validity."""
 from __future__ import annotations
 

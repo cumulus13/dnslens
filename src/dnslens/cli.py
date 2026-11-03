@@ -1,3 +1,9 @@
+# File: dnslens/src/dnslens/cli.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Command line interface."""
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ from .core import (
 )
 from .dnssec import check_dnssec
 from .manage import Manager, default_data_dir
+from .migrate import migrate_files_to_db
 from .output import Style, emit_json, render_table, setup_streams, supports_color
 from .server import (
     DEFAULT_UPSTREAMS,
@@ -39,6 +46,7 @@ from .server import (
     default_allow,
     load_config_file,
 )
+from .storage import open_database, open_log_database
 from .tools import DEFAULT_BENCH_DOMAINS, bench, propagate, wait
 from .trace import trace
 from .web import WebServer
@@ -140,8 +148,21 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--web-user", help="set the admin username")
     w.add_argument("--web-password", default=os.environ.get("DNSLENS_WEB_PASSWORD"),
                    help="set the admin password (or env DNSLENS_WEB_PASSWORD); default: generated once and printed")
+    w.add_argument("--db", metavar="URL", default=os.environ.get("DNSLENS_DB_URL"),
+                   help="keep config, blocklists and the query log in a SQL database instead of files "
+                        "(sqlite:///f.db, postgresql://..., mysql://...; needs dnslens[sql]; or env DNSLENS_DB_URL)")
+    w.add_argument("--log-db", metavar="URL", default=os.environ.get("DNSLENS_LOG_DB_URL"),
+                   help="keep only the query log in this database (overrides --db for the log)")
     w.add_argument("--web-cert", metavar="FILE", help="TLS certificate (PEM) to serve the UI over HTTPS")
     w.add_argument("--web-key", metavar="FILE", help="TLS private key (PEM)")
+
+    s = sub.add_parser("db", help="database storage tools")
+    dsub = s.add_subparsers(dest="dbcmd", required=True, metavar="ACTION")
+    m = dsub.add_parser("migrate", help="copy a file-based data directory into a database")
+    m.add_argument("--from-dir", required=True, metavar="DIR", help="existing data directory (the one with config.json)")
+    m.add_argument("--to", required=True, metavar="URL", default=os.environ.get("DNSLENS_DB_URL"), help="target database URL")
+    m.add_argument("--no-log", action="store_true", help="do not copy the query log")
+    m.add_argument("--force", action="store_true", help="overwrite a configuration already in the database")
 
     s = sub.add_parser("api", help="run the HTTP API (JSON + Prometheus probe endpoints)")
     s.add_argument("--host", default="127.0.0.1")
@@ -379,12 +400,22 @@ def cmd_serve(a: argparse.Namespace, st: Style) -> int:
     elif a.host not in ("127.0.0.1", "::1"):
         log.warning("no client ACL on a non-loopback address: this is an open resolver")
     manager = web = None
+    if (a.db or a.log_db) and not a.web:
+        print("dnslens: --db/--log-db only apply together with --web", file=sys.stderr)
+        server.stop()
+        return 2
     if a.web:
         try:
+            store, qlog = None, None
+            if a.db:
+                store, qlog = open_database(a.db)
+            if a.log_db:
+                qlog = open_log_database(a.log_db)
             seed = {"upstreams": list(opts.upstreams), "upstream_timeout": opts.upstream_timeout, "forward": opts.forward,
                     "cache_size": opts.cache_size, "max_ttl": opts.max_ttl, "block_mode": a.block_mode or zone.block_mode}
             loopback = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(a.host, a.host)
-            manager = Manager(a.data_dir or default_data_dir(), handler, zone, seed, dns_addr=f"{a.host}:{server.port}")
+            data_dir = a.data_dir or ("" if store is not None else default_data_dir())
+            manager = Manager(data_dir, handler, zone, seed, dns_addr=f"{a.host}:{server.port}", store=store, qlog=qlog)
             manager.start(password=a.web_password, username=a.web_user)
             web = WebServer(manager, a.web_host, a.web_port, a.web_cert, a.web_key, local_dns=f"{loopback}#{server.port}")
             web.start()
@@ -395,7 +426,8 @@ def cmd_serve(a: argparse.Namespace, st: Style) -> int:
             server.stop()
             return 1
         scheme = "https" if web.tls else "http"
-        log.info("web UI: %s://%s:%d  (data in %s)", scheme, a.web_host if ":" not in a.web_host else f"[{a.web_host}]", web.port, manager.data_dir)
+        log.info("web UI: %s://%s:%d", scheme, a.web_host if ":" not in a.web_host else f"[{a.web_host}]", web.port)
+        log.info("storage: config in %s; query log in %s", manager.store.describe(), manager.qlog.describe())
         if manager.initial_password:
             log.warning("first start: sign in as '%s' with password '%s' (change it on the Account page)",
                         manager.cfg["auth"]["username"], manager.initial_password)
@@ -420,6 +452,16 @@ def cmd_serve(a: argparse.Namespace, st: Style) -> int:
             manager.stop()
         server.stop()
         log.info("stats: %s", " ".join(f"{k}={v}" for k, v in handler.stats.snapshot().items()))
+    return 0
+
+
+def cmd_db(a: argparse.Namespace, st: Style) -> int:
+    try:
+        res = migrate_files_to_db(a.from_dir, a.to, not a.no_log, a.force, lambda m: print(m, file=sys.stderr))
+    except ConfigError as e:
+        print(f"dnslens: {e}", file=sys.stderr)
+        return 2
+    print(f"migrated: config, {res['lists']} blocklist(s), {res['log_rows']} log row(s) -> {res['target']}")
     return 0
 
 
@@ -451,7 +493,7 @@ def cmd_api(a: argparse.Namespace, st: Style) -> int:
 COMMANDS = {
     "query": cmd_query, "trace": cmd_trace, "propagate": cmd_propagate, "wait": cmd_wait,
     "bench": cmd_bench, "audit": cmd_audit, "dnssec": cmd_dnssec, "reverse": cmd_reverse,
-    "serve": cmd_serve, "api": cmd_api,
+    "serve": cmd_serve, "api": cmd_api, "db": cmd_db,
 }
 
 

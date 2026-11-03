@@ -1,3 +1,9 @@
+# File: dnslens/src/dnslens/api.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """HTTP API (JSON + Prometheus text) exposing the dnslens tools. Standard library only."""
 from __future__ import annotations
 
@@ -383,9 +389,9 @@ def _make_handler(cfg: ApiConfig, metrics: Metrics, sem: threading.BoundedSemaph
             except Exception:
                 log.exception("unhandled error on %s", path)
                 status, body, ctype = 500, b'{"error": "internal error"}', "application/json"
-            self._send(status, body, ctype, head)
             if counted or path in ROUTES or path in ("/", "/metrics"):
-                metrics.observe(label, status, time.perf_counter() - t0)
+                metrics.observe(label, status, time.perf_counter() - t0)  # before replying, so /metrics is never behind
+            self._send(status, body, ctype, head)
 
         def do_GET(self) -> None:
             self._handle(False)

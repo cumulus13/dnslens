@@ -1,3 +1,11 @@
+/*
+ * File: dnslens/src/dnslens/webui/style.css
+ * Author: Hadi Cahyadi <cumulus13@gmail.com>
+ * Date: 2026-11-03 07:32:20 SE Asia Standard Time
+ * Description:
+ * License: GPL-3.0
+*/
+
 :root{--bg:#f4f6fa;--card:#fff;--text:#1b2230;--muted:#6b7588;--line:#e3e8f0;--accent:#2563eb;--accent-text:#fff;
 --ok:#16a34a;--bad:#dc2626;--warn:#d97706;--info:#0891b2;--shadow:0 1px 2px rgba(16,24,40,.06),0 1px 3px rgba(16,24,40,.08);
 --c1:#2563eb;--c2:#16a34a;--c3:#d97706;--c4:#9333ea;--c5:#0891b2;--c6:#db2777;--c7:#65a30d;--c8:#64748b;--radius:10px}
@@ -97,3 +105,10 @@ tr.click{cursor:pointer}tr.click:hover td{background:var(--bg)}
 @media (max-width:1000px){.g4{grid-template-columns:repeat(2,minmax(0,1fr))}.g3{grid-template-columns:1fr 1fr}}
 @media (max-width:760px){.layout{grid-template-columns:1fr}.side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;padding:8px}
 .side .brand{padding:4px 8px}.side .foot{display:none}.nav{display:flex;flex-wrap:wrap}.g4,.g3,.g2{grid-template-columns:1fr}.content{padding:14px}.top{padding:10px 14px}}
+.qps{font-size:30px;font-weight:700;font-variant-numeric:tabular-nums;min-width:2ch}
+.dot.pulse{animation:pulse 1.6s ease-out infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(22,163,74,.55)}70%{box-shadow:0 0 0 7px rgba(22,163,74,0)}100%{box-shadow:0 0 0 0 rgba(22,163,74,0)}}
+tr.flash td{animation:flash 1.4s ease-out}
+@keyframes flash{from{background:rgba(37,99,235,.18)}to{background:transparent}}
+#live-feed td{padding:5px 8px;font-size:13px}
+@media (prefers-reduced-motion:reduce){.dot.pulse,tr.flash td{animation:none}}

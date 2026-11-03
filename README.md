@@ -8,13 +8,17 @@ Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a lo
 [![CI](https://github.com/cumulus13/dnslens/actions/workflows/ci.yml/badge.svg)](https://github.com/cumulus13/dnslens/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/dnslens)](https://pypi.org/project/dnslens/)
 [![Python](https://img.shields.io/pypi/pyversions/dnslens)](https://pypi.org/project/dnslens/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-orange.svg)](LICENSE)
+[![EULA](https://img.shields.io/badge/EULA-proprietary-lightgrey.svg)](EULA.md)
 
 </div>
 
 ---
 
 <p align="center">
+  <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot0.png" target="_blank">
+    <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot0.png" width="98%" alt="Screenshot 1">
+  </a>
   <a href="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot1.png" target="_blank">
     <img src="https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/screenshot1.png" width="98%" alt="Screenshot 1">
   </a>
@@ -49,6 +53,7 @@ Query, trace, propagation checks, benchmarks, health audits, DNSSEC checks, a lo
   - [query](#query) · [trace](#trace) · [propagate](#propagate) · [wait](#wait) · [bench](#bench) · [audit](#audit) · [dnssec](#dnssec) · [reverse](#reverse)
 - [DNS server: `dnslens serve`](#dns-server-dnslens-serve)
 - [Web UI: `dnslens serve --web`](#web-ui-dnslens-serve---web)
+  - [Live dashboard](#live-dashboard) · [Where data is stored](#where-data-is-stored) · [Database storage](#database-storage-sqlalchemy)
 - [HTTP API: `dnslens api`](#http-api-dnslens-api)
 - [Recipes](#recipes)
 - [Use as a Python library](#use-as-a-python-library)
@@ -82,6 +87,9 @@ Design goals: **works the same on Windows, Linux and macOS**, scriptable (`--jso
 ```bash
 pip install dnslens                 # Python 3.9+
 pip install "dnslens[doh]"          # adds DNS-over-HTTPS (httpx)
+pip install "dnslens[postgres]"     # store web UI data in PostgreSQL (SQLAlchemy + psycopg)
+pip install "dnslens[mysql]"        # ... or MySQL / MariaDB (SQLAlchemy + PyMySQL)
+pip install "dnslens[sql]"          # SQLAlchemy only (SQLite file via SQLAlchemy, or bring your own driver)
 pipx install dnslens                # isolated CLI install
 ```
 
@@ -575,7 +583,7 @@ On the first start a random admin password is generated, printed **once** in the
 
 | Page | What you get |
 |---|---|
-| **Dashboard** | Query, blocked, cache-hit and rule counters; stacked timeline chart (resolved / blocked / failed) with hover details; top queried domains, top blocked domains, top clients, upstream servers with average latency, query types and response codes; windows of 1 h, 6 h, 24 h, 7 d, 30 d; refreshes every 10 s. One click blocks or allows a domain straight from the top lists. |
+| **Dashboard** | Query, blocked, cache-hit and rule counters; stacked timeline chart (resolved / blocked / failed) with hover details; top queried domains, top blocked domains, top clients, upstream servers with average latency, query types and response codes; windows of 1 h, 6 h, 24 h, 7 d, 30 d; statistics refresh every 10 s. **Live traffic** panel updates every second (see below). One click blocks or allows a domain straight from the top lists. |
 | **Query log** | Every query with time, domain, type, status (Blocked, Cached, Local, Resolved, Failed), answers, client, upstream and latency. Search, status filter, paging, live mode, row details (which rule in which list blocked it), one-click Block / Unblock. |
 | **Filters** | Subscribe to blocklists by URL (presets included), enable/disable, update now, automatic refresh. Custom rules editor (`\|\|domain^`, `@@\|\|domain^`). *Check a host* tells you which rule and list would block a name. |
 | **DNS rewrites** | Point names (wildcards allowed) at an address or another name, with A/AAAA/CNAME/TXT/MX/PTR/NS/SRV/CAA, TTL, enable/disable, edit in place. |
@@ -601,9 +609,9 @@ flowchart LR
         WEB["Web server<br/>sessions, JSON API, static UI"]
     end
 
-    DB[("queries.db<br/>SQLite")]
-    CFG[("config.json<br/>0600")]
-    FLT[("filters/*.txt")]
+    DB[("query log<br/>SQLite file or SQL database")]
+    CFG[("settings + account<br/>config.json or SQL table")]
+    FLT[("blocklists<br/>files or SQL table")]
     UP["Upstream resolvers"]
     BR["Your browser"]
 
@@ -617,6 +625,9 @@ flowchart LR
     MGR --> CFG
     MGR --> FLT
 ```
+
+[![How the pieces connect](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture15.jpg)](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture15.jpg)
+
 
 Query logging never slows DNS down: the DNS path only drops an event into a bounded in-memory queue; a separate thread writes batches to SQLite (WAL mode). If the queue ever overflows, events are dropped and counted rather than blocking answers.
 
@@ -636,6 +647,9 @@ flowchart TD
     BL -- "yes" --> BLOCKED["NXDOMAIN or 0.0.0.0<br/>status: Blocked<br/>log keeps rule + list"]
     BL -- "no" --> FWD["cache, then upstream<br/>status: Cached or Resolved"]
 ```
+
+[![What happens to a query](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture16.jpg)](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture16.jpg)
+
 
 - **Allow beats block**, so `@@||example.org^` always wins, even against a list. A *custom* block rule beats a list's allow rule for the same domain.
 - A rule for a domain covers its subdomains. `||ads.example.com^` blocks `x.ads.example.com` too.
@@ -674,17 +688,103 @@ sequenceDiagram
     M-->>U: 200 JSON
 ```
 
-### Data directory
+[![Sign-in, sessions and CSRF](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture17.jpg)](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture17.jpg)
 
-Everything the UI manages lives in one directory (`--data-dir`; default `%APPDATA%\dnslens` on Windows, `~/.local/share/dnslens` elsewhere). It is created with owner-only permissions because it holds client IPs and your password hash.
+### Live dashboard
 
-```text
-config.json    settings, lists, rewrites, custom rules, password hash   (written atomically, 0600)
-queries.db     query log + statistics (SQLite, WAL)
-filters/N.txt  downloaded blocklists
+The dashboard has a **Live traffic** panel next to the statistics: queries per second with a scrolling two-minute chart (resolved / blocked / failed), a feed of the most recent queries with their status, and counters (queries, blocked, cached) that tick up in real time. *Pause* and *Resume* it with the button; the choice is remembered in the browser.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant D as DNS server
+    participant H as LiveHub (ticker thread)
+    participant W as Web server
+    participant B as Browser dashboard
+
+    B->>W: GET /api/live (EventSource, session cookie)
+    W-->>B: event hello: last 2 minutes + recent queries
+    loop every query (cheap)
+        D->>H: increment counters, keep a small sample
+    end
+    loop every second
+        H->>H: close the second: totals, blocked, cache, avg ms, up to 15 sample queries
+        H-->>W: new tick
+        W-->>B: event tick
+        B->>B: update chart, feed and the stat cards
+    end
+    Note over B,W: No push within 5 s (buffering proxy)? the browser switches to GET /api/live/poll?since=N once per second
 ```
 
-**Static vs managed configuration.** `-c zone.json`, `--record`, `--block`, `--blocklist` and `--authoritative` still work and are layered *under* what you manage in the UI (they show up as "static configuration" and are read-only there). Flags such as `--upstream`, `--cache-size`, `--max-ttl`, `--no-forward` and `--block-mode` only **seed** `config.json` the first time; afterwards the UI's settings win.
+[![Live dashboard](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture18.jpg)](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture18.jpg)
+
+- **Constant cost.** The DNS path only bumps a few counters; one thread turns them into one small message per second, so a busy resolver (thousands of queries/s) costs the browser the same as an idle one. When more than 15 queries arrive in a second, the feed shows a sample and says so.
+- **Server-Sent Events first, polling as a fallback.** SSE is a plain long-lived HTTP response (no WebSocket, no extra dependency). If it does not deliver within 5 s (some proxies buffer streaming responses) the page falls back to polling `/api/live/poll` automatically. The status next to the panel title reads *live* or *live (polling)*.
+- **Limits.** At most 20 simultaneous live viewers (each holds one connection); a stream ends cleanly when its session expires or is signed out.
+- **Behind nginx** add `proxy_buffering off; proxy_read_timeout 1h;` to the `location` (the server already sends `X-Accel-Buffering: no`).
+- The *Query log* page's **Live** switch refreshes the log from the database every 2 s (complete, not sampled).
+
+### Where data is stored
+
+Everything the UI manages goes through one storage layer, with two interchangeable modes:
+
+```mermaid
+flowchart TD
+    UI["Web UI / API"] --> M["Manager<br/>settings, lists, rewrites, rules, account"]
+    DNS["DNS server"] -->|"every query"| QL["Query log writer<br/>batched, off the DNS path"]
+    M --> MODE{"started with --db ?"}
+    QL --> MODE
+    MODE -- "no (default)" --> F["Files, no extra dependency<br/>config.json, filters/N.txt,<br/>queries.db (SQLite)"]
+    MODE -- "yes" --> D[("SQL database via SQLAlchemy<br/>SQLite, PostgreSQL, MySQL, MariaDB")]
+    D --> T["dnslens_config<br/>dnslens_lists<br/>dnslens_queries"]
+```
+
+[![Where data is stored](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture19.jpg)](https://raw.githubusercontent.com/licface15/images/refs/heads/main/dnslens/architecture19.jpg)
+
+
+| | Files (default) | Database (`--db`) |
+|---|---|---|
+| Install | `pip install dnslens` | `pip install "dnslens[postgres]"`, `[mysql]` or `[sql]` |
+| Settings, account, rewrites, rules, list metadata | `config.json` (written atomically, `0600`) | table `dnslens_config` (one JSON document + revision counter) |
+| Downloaded blocklists | `filters/N.txt` | table `dnslens_lists` (zlib-compressed, `LONGBLOB` on MySQL) |
+| Query log and statistics | `queries.db`, SQLite via the standard library | table `dnslens_queries` (indexed by time, domain, client) |
+| Location | `--data-dir` (Windows `%APPDATA%\dnslens`, otherwise `~/.local/share/dnslens`, owner-only) | the URL you give |
+| Several servers sharing the state | no | **yes**: nodes pick up each other's changes within 5 s |
+| Backup | copy the directory | your normal database backup |
+
+The **Settings** page shows where the running instance keeps its data (read only), and credentials in the database URL are masked everywhere (log, UI).
+
+**Static vs managed configuration.** `-c zone.json`, `--record`, `--block`, `--blocklist` and `--authoritative` still work and are layered *under* what you manage in the UI (they show up as "static configuration" and are read-only there). Flags such as `--upstream`, `--cache-size`, `--max-ttl`, `--no-forward` and `--block-mode` only **seed** the stored settings the first time; afterwards the UI's settings win.
+
+### Database storage (SQLAlchemy)
+
+```bash
+pip install "dnslens[postgres]"
+export DNSLENS_DB_URL='postgresql://dnslens:secret@db.internal/dnslens'   # keeps the password out of `ps`
+dnslens serve --web                                                      # config, lists AND query log in PostgreSQL
+
+dnslens serve --web --db 'mysql://dnslens:secret@127.0.0.1/dnslens?charset=utf8mb4'
+dnslens serve --web --db sqlite:////var/lib/dnslens/dnslens.db           # SQLite through SQLAlchemy
+dnslens serve --web --log-db postgresql://...                            # only the query log in a database, the rest stays in files
+```
+
+- **URLs** are standard SQLAlchemy URLs. `postgresql://` and `mysql://` pick the driver that is installed (psycopg 3 / psycopg2, PyMySQL / mysqlclient); `mariadb+pymysql://` works too.
+- **Tables are created automatically** on first start (`dnslens_config`, `dnslens_lists`, `dnslens_queries`). The database user needs `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `SELECT` and index rights on its schema; nothing else. Use `utf8mb4` on MySQL/MariaDB.
+- **Tested** on SQLite, PostgreSQL 16 and MariaDB 10.11 (SQLAlchemy 2.0 and 2.1), including a 2 MB blocklist and two servers sharing one database.
+- **Several nodes, one database.** Run two or more `dnslens serve --web --db ...` (for example a primary and a secondary resolver). A rewrite, list, setting or password changed on one node is picked up by the others within 5 s, and all nodes write to the same query log, so the dashboard shows the combined traffic. Protection pause is part of the shared configuration. If two admins save at the same moment the last write wins.
+- **Moving an existing installation** from files to a database:
+
+  ```mermaid
+  flowchart LR
+      A["data directory<br/>config.json, filters, queries.db"] -->|"dnslens db migrate<br/>--from-dir DIR --to URL"| B[("database")]
+      B --> C["dnslens serve --web --db URL"]
+  ```
+
+  ```bash
+  dnslens db migrate --from-dir ~/.local/share/dnslens --to "$DNSLENS_DB_URL"   # --no-log skips the query log, --force overwrites
+  ```
+
+  The password hash, rules, rewrites, lists and the log history are copied; the original directory is left untouched.
 
 ### Web options
 
@@ -695,6 +795,8 @@ filters/N.txt  downloaded blocklists
 | `--data-dir DIR` | per-user | Where state lives |
 | `--web-user` / `--web-password` | `admin` / generated | Set credentials (password also via `DNSLENS_WEB_PASSWORD`) |
 | `--web-cert` / `--web-key` | none | PEM files; serve the UI over HTTPS (TLS 1.2+, HSTS, `Secure` cookie) |
+| `--db URL` | env `DNSLENS_DB_URL` | Keep config, blocklists and the query log in a SQL database ([details](#database-storage-sqlalchemy)) |
+| `--log-db URL` | env `DNSLENS_LOG_DB_URL` | Keep only the query log in this database |
 
 ### Behind a reverse proxy
 
@@ -722,6 +824,8 @@ server {
 | Blocklist subscriptions, custom rules, check host | yes (AdGuard/hosts/domain syntax subset) | yes (full syntax) |
 | DNS rewrites, wildcards | yes | yes |
 | Pause protection with a timer | yes | yes |
+| Live traffic view (per-second chart and feed) | yes | partial (log refresh) |
+| Storage in PostgreSQL / MySQL, several nodes on one database | **yes** | no (local files) |
 | Upstream test, cache, retention, anonymization | yes | yes |
 | Built-in diagnostics (propagation, trace, audit, DNSSEC) | **yes** | no |
 | Prometheus probes / REST for automation | **yes** (`dnslens api`) | partial |
@@ -1062,6 +1166,7 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 
 - **`serve`** binds to loopback by default. Binding anywhere else limits clients to private ranges (RFC 1918, ULA, link-local, CGNAT, loopback) unless you pass `--allow`. Open resolvers are abused for DDoS amplification, so do not expose it to the internet. AXFR/IXFR are refused. There is no rate limiting.
 - **Web UI.** Binds to loopback by default; on other addresses it warns when TLS is off. Sign-in uses PBKDF2-SHA256 (240k iterations), constant-time comparison, a lockout after 5 failed attempts in 5 minutes per IP, `HttpOnly` + `SameSite=Strict` session cookies (24 h sliding), and sessions are invalidated when the password changes. State-changing requests need a custom header and a same-origin `Origin`. Responses carry a strict Content-Security-Policy (no inline scripts), `X-Frame-Options: DENY`, `nosniff` and `no-referrer`. All DNS-derived text (domains from clients!) is rendered with `textContent`, never `innerHTML`; this is covered by a test that sends a hostile name. List URLs must be `http(s)`; the admin is trusted to choose them, so do not expose the UI to people you would not trust with outbound HTTP requests from this host.
+- **Database credentials.** Prefer the `DNSLENS_DB_URL` environment variable over `--db` (command lines are visible to other users via `ps`). Passwords are masked in logs and in the UI, the stored admin password is a PBKDF2 hash, and the database account only needs rights on its own schema. The query log contains client IPs and the names they look up: set a short retention or enable anonymization if that is sensitive.
 - **`api`** binds to loopback by default and warns when you bind elsewhere without `--token`. Token comparison is constant-time. Callers can only use resolvers you registered (plus the public set) unless `--allow-custom-resolver` is set, which prevents using it to send packets to arbitrary hosts. Inputs are validated and clamped, and concurrency is capped. It speaks plain HTTP: put it behind a TLS reverse proxy if it leaves localhost.
 - Zone and blocklist files are data only; nothing is executed.
 - Reports from `audit` and `propagate` reveal what public DNS says about a domain. They contain nothing secret, but the API makes your host perform those queries on request.
@@ -1076,6 +1181,10 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 | `propagate` says INCONSISTENT for a CDN hostname | Round-robin / GeoDNS answers differ legitimately. Use `--expect` with the full set, or `--subset` with `wait`. |
 | Some public resolvers show `FAIL timeout` | Your network blocks UDP/53 to them. They are ignored unless `--strict`. Try `--transport tcp` or `tls`. |
 | `audit` reports an unreachable IPv6 nameserver | Only a `WARN`: the host may lack IPv6 connectivity. |
+| `database storage needs SQLAlchemy` | `pip install "dnslens[postgres]"` (or `[mysql]` / `[sql]`). |
+| `cannot use database ...` on start | Wrong URL or credentials, the server is unreachable, or the user may not create tables. The message includes the driver's error. |
+| Live panel says *live (polling)* | A proxy buffers streaming responses. Works as is; for true push add `proxy_buffering off;` (nginx). |
+| Live panel says *reconnecting...* | The browser lost the connection (server restarted, or the session expired: you are sent to the sign-in page). |
 | Forgot the web UI password | Restart with `--web-password 'new passphrase'` (it is stored hashed). The data directory keeps everything else. |
 | Dashboard is empty | Query logging is switched off in Settings, or no client uses this server yet. Test with `dnslens query example.com -r 127.0.0.1#5353`. |
 | A blocklist cannot be downloaded | The host has no outbound HTTP(S), or the URL is wrong. The error is shown on the Filters page; the list keeps its old rules. |
@@ -1092,7 +1201,8 @@ with DNSServer(DNSHandler(zone, ServerOptions(forward=False)), "127.0.0.1", 5353
 - `trace` uses a built-in list of root server addresses and IPv4 glue first; an IPv6-only network may need the system resolver for glueless delegations.
 - Zone files are JSON, not RFC 1035 master files.
 - The web UI is a single-admin panel: no multi-user roles, no per-client rules, no DHCP, no DoH/DoT/DoQ listeners. Blocklist support covers the DNS-relevant subset of AdGuard syntax (see the table above).
-- The query log lives in SQLite; for very busy resolvers (millions of queries a day) use a short retention.
+- Database mode creates the tables itself and has no migration framework yet (schema version 1); there is no `db export` back to files. Nodes sharing a database sync configuration every 5 s, not instantly.
+- The query log lives in SQLite or a SQL database; for very busy resolvers (millions of queries a day) use a short retention.
 
 ## Development and releasing
 
@@ -1102,10 +1212,14 @@ pip install -e ".[dev]"
 pytest && ruff check src tests && mypy src
 ```
 
-The tests start an in-process fake DNS server on localhost and need no network. CI (on pushes to `main`/`master` and on pull requests) runs lint, type checks and the tests on Ubuntu, Windows and macOS for Python 3.9 to 3.13, plus a web UI smoke test.
+The tests start an in-process fake DNS server on localhost and need no network. CI (on pushes to `main`/`master` and on pull requests) runs lint, type checks and the tests on Ubuntu, Windows and macOS for Python 3.9 to 3.13, plus a web UI smoke test and a job that runs the database tests against PostgreSQL 16 and MariaDB 11 service containers.
 
 ```bash
-# optional: UI smoke test (needs Node 20+)
+# database backends on real servers (SQLite always runs)
+DNSLENS_TEST_PG='postgresql+psycopg://user:pw@localhost/dnslens' \
+DNSLENS_TEST_MYSQL='mysql+pymysql://user:pw@localhost/dnslens?charset=utf8mb4' pytest tests/test_sql.py
+
+# optional: UI smoke test, SSE and polling paths (needs Node 20+)
 cd tests/ui && npm install && cd ../.. && bash tests/ui/run.sh
 ```
 
@@ -1120,7 +1234,11 @@ src/dnslens/
   api.py       HTTP API, probes, metrics
   manage.py    runtime-managed settings, lists, rewrites, accounts (web UI back end)
   web.py       web server: sessions, CSRF, JSON API for the UI
-  querylog.py  SQLite query log + statistics
+  querylog.py  query log + statistics (SQLite from the standard library)
+  storage.py   file storage and the storage selector
+  sqlstore.py  SQLAlchemy backend: config, blocklists, query log (PostgreSQL, MySQL/MariaDB, SQLite)
+  migrate.py   `dnslens db migrate`
+  live.py      per-second live feed (SSE and polling)
   filters.py   blocklist parsing and subscriptions
   webui/       the single-page app (index.html, app.js, charts.js, style.css)
   cli.py       argparse front end
@@ -1154,7 +1272,7 @@ flowchart LR
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+[GPL-3.0](LICENSE) and [EULA](EULA.md)
 
 ## 👤 Author
         

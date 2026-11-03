@@ -1,117 +1,23 @@
-import http.cookiejar
+# File: dnslens/tests/test_web.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:19 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 import json
 import ssl
-import threading
 import time
-import urllib.error
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import dns.message
 import dns.query
 import dns.rcode
-import pytest
-from conftest import zone_handler
+from helpers import LIST, PW, Client, ListServer  # noqa: F401
 
 from dnslens.filters import parse_rules
 from dnslens.manage import Manager, hash_password, verify_password
 from dnslens.querylog import QueryLog, anonymize
-from dnslens.server import DNSHandler, DNSServer, QueryEvent, ServerOptions, ZoneData
+from dnslens.server import DNSHandler, QueryEvent, ZoneData
 from dnslens.web import WebServer
-
-PW = "correct-horse-1"
-LIST = "# test list\n0.0.0.0 ads.bad.test\n||tracker.bad.test^\n@@||ok.bad.test^\nplain.bad.test\n/regex/\n"
-
-
-class Client:
-    def __init__(self, base, ctx=None):
-        self.base = base
-        self.jar = http.cookiejar.CookieJar()
-        handlers = [urllib.request.HTTPCookieProcessor(self.jar)]
-        if ctx:
-            handlers.append(urllib.request.HTTPSHandler(context=ctx))
-        self.op = urllib.request.build_opener(*handlers)
-
-    def call(self, method, path, body=None, headers=None, csrf=True):
-        h = dict(headers or {})
-        if csrf and method != "GET":
-            h["X-Requested-With"] = "dnslens"
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode()
-            h["Content-Type"] = "application/json"
-        req = urllib.request.Request(self.base + path, data=data, headers=h, method=method)
-        try:
-            with self.op.open(req, timeout=10) as r:
-                raw = r.read()
-                return r.status, (json.loads(raw) if raw and "json" in r.headers.get("Content-Type", "") else raw), r.headers
-        except urllib.error.HTTPError as e:
-            raw = e.read()
-            try:
-                return e.code, json.loads(raw), e.headers
-            except ValueError:
-                return e.code, raw, e.headers
-
-    def login(self, pw=PW, user="admin"):
-        return self.call("POST", "/api/login", {"username": user, "password": pw})
-
-
-class ListServer:
-    def __init__(self, text):
-        outer = self
-        outer.text = text
-
-        class H(BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = outer.text.encode()
-                self.send_response(200)
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *a):
-                pass
-
-        self.httpd = HTTPServer(("127.0.0.1", 0), H)
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}/list.txt"
-
-    def close(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-
-@pytest.fixture
-def stack(tmp_path, serve):
-    up = serve(zone_handler({("example.test.", "A"): ["192.0.2.1"], ("ads.bad.test.", "A"): ["203.0.113.66"],
-                             ("ok.bad.test.", "A"): ["203.0.113.67"], ("plain.bad.test.", "A"): ["203.0.113.68"],
-                             ("tracker.bad.test.", "A"): ["203.0.113.69"]}, aa=False))
-    handler = DNSHandler(ZoneData(), ServerOptions(upstream_timeout=1.0))
-    mgr = Manager(str(tmp_path / "data"), handler, ZoneData(), {"upstreams": [f"127.0.0.1#{up.port}"]}, dns_addr="127.0.0.1:0")
-    mgr.start(password=PW)
-    dnssrv = DNSServer(handler, "127.0.0.1", 0).start()
-    web = WebServer(mgr, "127.0.0.1", 0, local_dns=f"127.0.0.1#{dnssrv.port}").start()
-    lists = ListServer(LIST)
-
-    class S:
-        pass
-
-    s = S()
-    s.mgr, s.handler, s.dns, s.web, s.lists, s.up = mgr, handler, dnssrv, web, lists, up
-    s.client = Client(f"http://127.0.0.1:{web.port}")
-    s.client.login()
-
-    def ask(name, rtype="A"):
-        r = dns.query.udp(dns.message.make_query(name, rtype), "127.0.0.1", timeout=3, port=dnssrv.port)
-        return r
-
-    s.ask = ask
-    yield s
-    web.stop()
-    dnssrv.stop()
-    mgr.stop()
-    lists.close()
-
 
 # ---------------------------------------------------------------- units ---
 

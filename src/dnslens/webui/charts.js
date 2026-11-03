@@ -24,6 +24,7 @@
   }
   function fmtTime(ts, bucket) {
     var d = new Date(ts * 1000);
+    if (bucket < 60) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     if (bucket >= 43200) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
     if (bucket >= 3600 * 3) return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

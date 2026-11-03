@@ -1,3 +1,9 @@
+# File: dnslens/tests/test_server.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:19 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 import json
 import socket
 import time

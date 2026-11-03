@@ -1,15 +1,19 @@
+# File: dnslens/src/dnslens/manage.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Runtime-managed configuration for the web UI: persisted settings, filters, rewrites, rules."""
 from __future__ import annotations
 
 import copy
 import hashlib
 import hmac
-import json
 import logging
 import os
 import re
 import secrets
-import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +24,10 @@ import dns.name
 from . import __version__
 from .core import QueryOpts, query
 from .filters import FilterList, FilterStore, rules_from_text, validate_url
-from .querylog import RETENTION_HOURS, QueryLog
+from .live import LiveHub
+from .querylog import RETENTION_HOURS, BaseQueryLog, QueryLog
 from .server import ConfigError, DNSHandler, ZoneData, norm_domain
+from .storage import FileStore
 
 log = logging.getLogger("dnslens.manage")
 
@@ -79,56 +85,67 @@ def default_data_dir() -> str:
 
 class Manager:
     def __init__(self, data_dir: str, handler: DNSHandler, static_zone: ZoneData,
-                 seed: Optional[Dict[str, Any]] = None, dns_addr: str = "") -> None:
+                 seed: Optional[Dict[str, Any]] = None, dns_addr: str = "",
+                 store: Optional[Any] = None, qlog: Optional[BaseQueryLog] = None) -> None:
         self.data_dir = data_dir
-        fresh = not os.path.isdir(data_dir)
-        os.makedirs(data_dir, exist_ok=True)
-        if fresh:
-            try:
-                os.chmod(data_dir, 0o700)  # holds client IPs, queried names and the password hash
-            except OSError:
-                pass
-        self.path = os.path.join(data_dir, "config.json")
         self.handler = handler
         self.static = static_zone
         self.dns_addr = dns_addr
         self.lock = threading.RLock()
-        self.store = FilterStore(os.path.join(data_dir, "filters"))
+        self.store = store if store is not None else FileStore(data_dir)
+        self.path = getattr(self.store, "path", "")
+        self.lists = FilterStore(self.store)
         self.cfg = self._load(seed)
+        self._rev = self.store.revision()
         lg = self.cfg["log"]
-        self.qlog = QueryLog(os.path.join(data_dir, "queries.db"), lg["retention_hours"], lg["enabled"], lg["anonymize"])
+        self.qlog: BaseQueryLog = qlog if qlog is not None else QueryLog(
+            os.path.join(data_dir, "queries.db"), lg["retention_hours"], lg["enabled"], lg["anonymize"])
+        self.qlog.retention_hours, self.qlog.enabled, self.qlog.anonymize_clients = lg["retention_hours"], lg["enabled"], lg["anonymize"]
+        self.live = LiveHub()
         self.handler.observers.append(self.qlog.record)
+        self.handler.observers.append(self.live.record)
         self._stop = threading.Event()
         self._updater = threading.Thread(target=self._update_loop, name="dnslens-filter-updater", daemon=True)
+        self._syncer = threading.Thread(target=self._sync_loop, name="dnslens-config-sync", daemon=True)
         self.initial_password: Optional[str] = None
 
     # ---- persistence ----
     def _load(self, seed: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         base = default_config(seed)
-        try:
-            with open(self.path, encoding="utf-8") as fh:
-                saved = json.load(fh)
+        saved = self.store.load()
+        if saved:
             for k, v in saved.items():
                 if isinstance(v, dict) and isinstance(base.get(k), dict):
                     base[k].update(v)
                 else:
                     base[k] = v
-        except FileNotFoundError:
-            pass
-        except (OSError, json.JSONDecodeError) as e:
-            raise ConfigError(f"cannot read {self.path}: {e}") from e
         return base
 
     def save(self) -> None:
         with self.lock:
-            fd, tmp = tempfile.mkstemp(dir=self.data_dir, suffix=".tmp")
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(self.cfg, fh, indent=2)
+            self.store.save(self.cfg)
+            self._rev = self.store.revision()
+
+    def sync_once(self) -> bool:
+        """Reload when the stored configuration changed elsewhere. Returns True if it did."""
+        rev = self.store.revision()
+        if rev in (self._rev, -1):
+            return False
+        with self.lock:
+            self.cfg = self._load(None)
+            self._rev = rev
+            self.lists.invalidate()
+            self.rebuild()
+        log.info("configuration changed in storage, reloaded")
+        return True
+
+    def _sync_loop(self) -> None:
+        """Pick up changes made elsewhere (another node sharing the database, or a manual file edit)."""
+        while not self._stop.wait(5.0):
             try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, self.path)
+                self.sync_once()
+            except Exception:
+                log.exception("config sync failed")
 
     # ---- lifecycle ----
     def start(self, password: Optional[str] = None, username: Optional[str] = None) -> Manager:
@@ -146,13 +163,17 @@ class Manager:
             self.handler.protection_until = float(p["until"] or 0)
             self.save()
         self.qlog.start()
+        self.live.start()
         self.rebuild()
         self._updater.start()
+        self._syncer.start()
         return self
 
     def stop(self) -> None:
         self._stop.set()
+        self.live.stop()
         self.qlog.stop()
+        self.store.close()
 
     def set_static(self, zone: ZoneData) -> None:
         with self.lock:
@@ -174,7 +195,7 @@ class Manager:
             for f in cfg["filters"]:
                 if not f["enabled"]:
                     continue
-                parsed = self.store.get(f["id"])
+                parsed = self.lists.get(f["id"])
                 if parsed is None:
                     continue
                 for d in parsed.blocks:
@@ -196,6 +217,10 @@ class Manager:
         o = self.handler.opts
         o.upstreams, o.upstream_timeout, o.forward, o.max_ttl = list(d["upstreams"]), float(d["upstream_timeout"]), bool(d["forward"]), int(d["max_ttl"])
         self.handler.cache.size = int(d["cache_size"])
+        p = self.cfg["protection"]
+        h = self.handler
+        if h.protection != bool(p["enabled"]) or h.protection_until != float(p["until"] or 0):
+            h.protection, h.protection_until = bool(p["enabled"]), float(p["until"] or 0)
         self.qlog.enabled, self.qlog.retention_hours, self.qlog.anonymize_clients = bool(lg["enabled"]), int(lg["retention_hours"]), bool(lg["anonymize"])
 
     # ---- status ----
@@ -209,7 +234,7 @@ class Manager:
             "zone": h.zone.counts(), "cache_entries": len(h.cache), "counters": h.stats.snapshot(),
             "filters": {"total": len(c["filters"]), "enabled": sum(1 for f in c["filters"] if f["enabled"])},
             "rewrites": len(c["rewrites"]), "forward": c["dns"]["forward"], "log_enabled": c["log"]["enabled"],
-            "username": c["auth"]["username"],
+            "username": c["auth"]["username"], "storage": self.storage_info(),
         }
 
     # ---- protection ----
@@ -225,10 +250,13 @@ class Manager:
         return self.status()["protection"]
 
     # ---- settings ----
+    def storage_info(self) -> Dict[str, str]:
+        return {"mode": getattr(self.store, "kind", "files"), "config": self.store.describe(), "log": self.qlog.describe()}
+
     def get_settings(self) -> Dict[str, Any]:
         c = self.cfg
         return {"dns": dict(c["dns"]), "log": dict(c["log"]), "filters_update_hours": c["filters_update_hours"],
-                "retention_options": list(RETENTION_HOURS)}
+                "retention_options": list(RETENTION_HOURS), "storage": self.storage_info()}
 
     def update_settings(self, data: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
@@ -364,7 +392,7 @@ class Manager:
             flt = FilterList(id=self._next_id(), name=name[:80], url=url)
         if fetch:
             try:
-                self.store.fetch(flt)
+                self.lists.fetch(flt)
             except Exception as e:
                 raise ValidationError(f"could not download the list: {e}") from e
         with self.lock:
@@ -392,7 +420,7 @@ class Manager:
             self.cfg["filters"] = [f for f in self.cfg["filters"] if f["id"] != fid]
             if len(self.cfg["filters"]) == n:
                 raise KeyError(fid)
-            self.store.remove(fid)
+            self.lists.remove(fid)
             self.save()
             self.rebuild()
 
@@ -405,7 +433,7 @@ class Manager:
         for f in targets:
             flt = FilterList(**f)
             try:
-                self.store.fetch(flt)
+                self.lists.fetch(flt)
             except Exception as e:
                 flt.error = str(e)[:200]
             with self.lock:

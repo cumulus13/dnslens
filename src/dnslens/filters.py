@@ -1,10 +1,14 @@
+# File: dnslens/src/dnslens/filters.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Filter rules: parsing (AdGuard / hosts / plain domains) and list subscriptions."""
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
-import tempfile
 import threading
 import time
 import urllib.request
@@ -105,16 +109,12 @@ def validate_url(url: str) -> str:
 
 
 class FilterStore:
-    """Downloads filter lists into ``<data>/filters`` and keeps the parsed rules in memory."""
+    """Downloads filter lists into the configured storage (files or database) and keeps parsed rules in memory."""
 
-    def __init__(self, directory: str) -> None:
-        self.dir = directory
-        os.makedirs(directory, exist_ok=True)
+    def __init__(self, storage: Any) -> None:
+        self.storage = storage
         self._parsed: Dict[int, ParsedRules] = {}
         self._lock = threading.Lock()
-
-    def _path(self, fid: int) -> str:
-        return os.path.join(self.dir, f"{fid}.txt")
 
     def fetch(self, flt: FilterList, timeout: float = 30.0) -> int:
         """Download and store a list; returns the rule count. Raises on failure."""
@@ -127,10 +127,7 @@ class FilterStore:
         parsed = parse_rules(text)
         if not parsed.blocks and not parsed.allows:
             raise ValueError("no usable rules found in the downloaded list")
-        fd, tmp = tempfile.mkstemp(dir=self.dir, suffix=".tmp")
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, self._path(flt.id))
+        self.storage.write_list(flt.id, text)
         with self._lock:
             self._parsed[flt.id] = parsed
         flt.last_updated = time.time()
@@ -139,10 +136,9 @@ class FilterStore:
         return flt.rules
 
     def load_text(self, fid: int, text: str) -> ParsedRules:
-        """Store list contents directly (used by tests and file-based lists)."""
+        """Store list contents directly (tests, imports)."""
         parsed = parse_rules(text)
-        with open(self._path(fid), "w", encoding="utf-8") as fh:
-            fh.write(text)
+        self.storage.write_list(fid, text)
         with self._lock:
             self._parsed[fid] = parsed
         return parsed
@@ -152,22 +148,22 @@ class FilterStore:
             p = self._parsed.get(fid)
         if p is not None:
             return p
-        try:
-            with open(self._path(fid), encoding="utf-8", errors="replace") as fh:
-                p = parse_rules(fh.read())
-        except OSError:
+        text = self.storage.read_list(fid)
+        if text is None:
             return None
+        p = parse_rules(text)
         with self._lock:
             self._parsed[fid] = p
         return p
 
+    def invalidate(self) -> None:
+        with self._lock:
+            self._parsed.clear()
+
     def remove(self, fid: int) -> None:
         with self._lock:
             self._parsed.pop(fid, None)
-        try:
-            os.remove(self._path(fid))
-        except OSError:
-            pass
+        self.storage.remove_list(fid)
 
 
 def rules_from_text(text: str) -> Tuple[Set[str], Set[str]]:

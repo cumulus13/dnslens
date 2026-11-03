@@ -1,3 +1,9 @@
+# File: dnslens/tests/conftest.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 import socket
 import threading
 from typing import Callable, Dict, List, Optional, Tuple
@@ -7,6 +13,7 @@ import dns.message
 import dns.rcode
 import dns.rrset
 import pytest
+from helpers import LIST, PW, Client, ListServer
 
 Handler = Callable[[dns.message.Message], Optional[dns.message.Message]]
 
@@ -80,3 +87,39 @@ def serve():
     yield start
     for s in servers:
         s.close()
+
+
+@pytest.fixture
+def stack(tmp_path, serve):
+    up = serve(zone_handler({("example.test.", "A"): ["192.0.2.1"], ("ads.bad.test.", "A"): ["203.0.113.66"],
+                             ("ok.bad.test.", "A"): ["203.0.113.67"], ("plain.bad.test.", "A"): ["203.0.113.68"],
+                             ("tracker.bad.test.", "A"): ["203.0.113.69"]}, aa=False))
+    from dnslens.manage import Manager
+    from dnslens.server import DNSHandler, DNSServer, ServerOptions, ZoneData
+    from dnslens.web import WebServer
+
+    handler = DNSHandler(ZoneData(), ServerOptions(upstream_timeout=1.0))
+    mgr = Manager(str(tmp_path / "data"), handler, ZoneData(), {"upstreams": [f"127.0.0.1#{up.port}"]}, dns_addr="127.0.0.1:0")
+    mgr.start(password=PW)
+    dnssrv = DNSServer(handler, "127.0.0.1", 0).start()
+    web = WebServer(mgr, "127.0.0.1", 0, local_dns=f"127.0.0.1#{dnssrv.port}").start()
+    lists = ListServer(LIST)
+
+    class S:
+        pass
+
+    s = S()
+    s.mgr, s.handler, s.dns, s.web, s.lists, s.up = mgr, handler, dnssrv, web, lists, up
+    s.client = Client(f"http://127.0.0.1:{web.port}")
+    s.client.login()
+
+    def ask(name, rtype="A"):
+        r = dns.query.udp(dns.message.make_query(name, rtype), "127.0.0.1", timeout=3, port=dnssrv.port)
+        return r
+
+    s.ask = ask
+    yield s
+    web.stop()
+    dnssrv.stop()
+    mgr.stop()
+    lists.close()

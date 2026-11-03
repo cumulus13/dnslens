@@ -1,3 +1,9 @@
+# File: dnslens/src/dnslens/web.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Web management UI + JSON API (AdGuard Home style). Standard library only."""
 from __future__ import annotations
 
@@ -33,6 +39,13 @@ ASSETS = {
 }
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+
+
+class Stream:
+    """A long-lived response body (Server-Sent Events)."""
+
+    def __init__(self, gen: Any, ctype: str = "text/event-stream; charset=utf-8") -> None:
+        self.gen, self.ctype = gen, ctype
 
 
 class HttpError(Exception):
@@ -72,6 +85,8 @@ class WebServer:
         self.fails: Dict[str, List[float]] = {}
         self._lock = threading.Lock()
         self._tools_sem = threading.BoundedSemaphore(4)
+        self.closing = False
+        self._live_clients = 0
         extra = {}
         if local_dns:
             from .core import Target
@@ -113,6 +128,12 @@ class WebServer:
                 return None
             self.sessions[tok] = (v[0], now + self.session_seconds)  # sliding expiry
             return v[0]
+
+    def session_valid(self, tok: str) -> bool:
+        """Like session_user but without extending the session (used by long-lived streams)."""
+        with self._lock:
+            v = self.sessions.get(tok)
+            return bool(v and v[1] >= time.time())
 
     def drop_session(self, tok: str, keep: bool = False) -> None:
         with self._lock:
@@ -165,6 +186,8 @@ class WebServer:
         r("POST", "/api/upstreams/test", lambda q: q.mgr.test_upstreams())
         r("POST", "/api/cache/clear", self.h_cache_clear)
         r("PUT", "/api/account", self.h_account)
+        r("GET", "/api/live", self.h_live)
+        r("GET", "/api/live/poll", self.h_live_poll)
         r("GET", r"/api/tools/(\w+)", self.h_tool)
 
     @staticmethod
@@ -237,6 +260,44 @@ class WebServer:
         self.drop_session(q.token, keep=True)
         return {"ok": True, "username": q.mgr.cfg["auth"]["username"]}
 
+    def h_live_poll(self, q: Req) -> Any:
+        hub = q.mgr.live
+        since = q.int_arg("since", 0, 0, 2**62)
+        if since == 0 or since > hub.seq:  # first call, or the server restarted: send recent history
+            return {**hub.snapshot(120), "hello": True}
+        return {"seq": hub.seq, "ticks": hub.since(since, 300), "events": [], "hello": False}
+
+    def h_live(self, q: Req) -> Any:
+        hub, token = q.mgr.live, q.token
+        with self._lock:
+            if self._live_clients >= 20:
+                raise HttpError(503, "too many live viewers")
+            self._live_clients += 1
+
+        def sse(event: str, data: Any) -> bytes:
+            return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n".encode()
+
+        def gen() -> Any:
+            try:
+                snap = hub.snapshot(120)
+                yield sse("hello", snap)
+                last = snap["seq"]
+                while not self.closing:
+                    ticks = hub.wait(last, 1.0)
+                    for t in ticks:
+                        yield sse("tick", t)
+                        last = t["seq"]
+                    if not ticks:
+                        yield b": keepalive\n\n"
+                    if not self.session_valid(token):
+                        yield sse("bye", {"reason": "session expired"})
+                        return
+            finally:
+                with self._lock:
+                    self._live_clients -= 1
+
+        return Stream(gen())
+
     def h_tool(self, q: Req) -> Any:
         fn = ROUTES.get("/" + q.groups[0])
         if fn is None or q.groups[0] in ("healthz", "probe"):
@@ -261,6 +322,7 @@ class WebServer:
         self.httpd.serve_forever(poll_interval=0.2)
 
     def stop(self) -> None:
+        self.closing = True
         self.httpd.shutdown()
         self.httpd.server_close()
         if self._thread:
@@ -402,6 +464,9 @@ def _make_handler(web: WebServer) -> Any:
                 raise HttpError(400, str(e)) from None
             except KeyError:
                 raise HttpError(404, "no such item") from None
+            if isinstance(result, Stream):
+                self._stream(result)
+                return
             status = 200
             if isinstance(result, tuple):
                 status, result = result
@@ -409,6 +474,25 @@ def _make_handler(web: WebServer) -> Any:
             if req.token != token:
                 cookie = self._set_cookie(req.token)
             self._respond_json(status, result, cookie=cookie, head=head)
+
+        def _stream(self, st: Stream) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", st.ctype)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")  # tell nginx not to buffer the stream
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", CSP)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            try:
+                for chunk in st.gen:
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+                pass
+            finally:
+                st.gen.close()
 
         def do_GET(self) -> None:
             self._handle("GET")

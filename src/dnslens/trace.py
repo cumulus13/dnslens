@@ -1,3 +1,9 @@
+# File: dnslens/src/dnslens/trace.py
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:22:18 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 """Iterative resolution from the root servers (like ``dig +trace``)."""
 from __future__ import annotations
 

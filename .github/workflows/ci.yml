@@ -1,3 +1,9 @@
+# File: dnslens/.github/workflows/ci.yml
+# Author: Hadi Cahyadi <cumulus13@gmail.com>
+# Date: 2026-11-03 07:42:17 SE Asia Standard Time
+# Description:
+# License: GPL-3.0
+
 name: CI
 
 on:
@@ -70,3 +76,39 @@ jobs:
       - run: npm install --no-audit --no-fund
         working-directory: tests/ui
       - run: bash tests/ui/run.sh
+
+  database:
+    name: database backends (PostgreSQL, MariaDB)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dnslens
+          POSTGRES_PASSWORD: dnslens-pw
+          POSTGRES_DB: dnslens
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U dnslens" --health-interval 5s --health-timeout 5s --health-retries 12
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: root-pw
+          MARIADB_USER: dnslens
+          MARIADB_PASSWORD: dnslens-pw
+          MARIADB_DATABASE: dnslens
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized" --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DNSLENS_TEST_PG: postgresql+psycopg://dnslens:dnslens-pw@127.0.0.1:5432/dnslens
+      DNSLENS_TEST_MYSQL: mysql+pymysql://dnslens:dnslens-pw@127.0.0.1:3306/dnslens?charset=utf8mb4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest tests/test_sql.py tests/test_live.py -q
+

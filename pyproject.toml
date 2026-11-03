@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dnslens"
-version = "1.0.3"
+version = "1.0.4"
 description = "Cross-platform DNS toolkit for developers and DevOps: query, trace, propagation, audit, DNSSEC, local DNS server with an AdGuard Home style web UI, and an HTTP/Prometheus API."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -58,12 +58,26 @@ dependencies = [
 doh = [
     "dnspython[doh]>=2.6",
 ]
+sql = [
+    "sqlalchemy>=2.0",
+]
+postgres = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+]
+mysql = [
+    "sqlalchemy>=2.0",
+    "pymysql>=1.1",
+]
 dev = [
     "pytest>=7",
     "ruff>=0.5",
     "mypy>=1.8",
     "build",
     "twine",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "pymysql>=1.1",
 ]
 
 [project.urls]
